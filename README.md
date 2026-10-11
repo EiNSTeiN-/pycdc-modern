@@ -1,5 +1,24 @@
 # pycdc-rs
 
+This fork extends [ejfkdev/pycdc](https://github.com/ejfkdev/pycdc) for several
+CPython 3.14 constructs encountered during static source recovery:
+
+- Nested inline comprehensions inside generator elements reuse the main parser.
+- Expanded generator calls consume Python 3.14's unconditional kwargs slot.
+- Await cleanup trampolines and fragmented exception regions stay out of source
+  `try` blocks; returns remain inside their enclosing async context and `finally`.
+- Short-circuit values inside comprehension elements remain values rather than
+  being mistaken for filters.
+- Large dictionary displays inside comprehensions keep their own `MAP_ADD 1`
+  operations.
+
+Build with `cargo build --release --locked`. In addition to `cargo test`, run
+`PYCDC_BINARY=target/release/pycdc python3.14 tests/python314_roundtrip.py -v`.
+These checks compile and execute only the original small fixtures in that file.
+The verification figures below describe the upstream project's corpus; this
+fork's changes have separate regression coverage and do not imply that arbitrary
+decompilations are equivalent to their inputs.
+
 English | [简体中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

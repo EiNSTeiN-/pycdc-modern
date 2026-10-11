@@ -259,14 +259,16 @@ struct InlineComp {
     key: Option<ExprRef>,
     cleared_vars: Vec<String>,
     target_seen: bool,
-    /// pending element-ternary folds: (merge offset, condition). The
+    /// Pending value folds: (merge offset, left/condition, optional bool op).
+    /// An and/or fold combines its saved left with the right value; a ternary
+    /// combines its condition with both arm values. The
     /// linear comp walk evaluates BOTH arms of an element ternary onto
     /// the value stack (then under else); when the walk reaches the
     /// ternary's merge offset the pair is folded into a Ternary. This
     /// works for nested ternaries (inner merge folds first) and for
     /// dict-comp key AND value positions alike (folding at the append
     /// op cannot tell which slot a pending cond belongs to).
-    pending_merges: Vec<(usize, ExprRef)>,
+    pending_merges: Vec<(usize, ExprRef, Option<BoolOpKind>)>,
     /// else-arm target shared by the current and-chain's ternary links
     tern_chain_t: Option<usize>,
 }
@@ -870,6 +872,11 @@ pub fn decompile_in_scope(
             let Some(&hi) = idx_of.get(&e.target) else {
                 return true;
             };
+            if instrs.get(hi).map(|instruction| instruction.op) == Some(Op::CLEANUP_THROW) {
+                // Await/yield suspension cleanup is interpreter protocol,
+                // even when followed by a backward jump and user handlers.
+                return false;
+            }
             let mut saw_reraise = false;
             for ins in instrs.iter().skip(hi).take(14) {
                 if matches!(ins.op, Op::RERAISE) {
@@ -884,6 +891,44 @@ pub fn decompile_in_scope(
             }
             !saw_reraise
         });
+    }
+
+    if version.at_least(3, 14) {
+        // Await suspension splits one source try into fragments, and its
+        // out-of-line CLEANUP_THROW trampoline can itself be protected by
+        // the same source handler. Rebuild the lexical await region before
+        // deriving try contexts; keep the original table for VM glue.
+        exc_entries.retain(|entry| {
+            idx_of.get(&entry.start).and_then(|index| instrs.get(*index))
+                .map_or(true, |instruction| instruction.op != Op::CLEANUP_THROW)
+        });
+        let mut grouped: std::collections::BTreeMap<(usize, u32, bool), Vec<crate::code::ExceptionEntry>> =
+            std::collections::BTreeMap::new();
+        for entry in exc_entries.drain(..) {
+            grouped.entry((entry.target, entry.depth, entry.lasti)).or_default().push(entry);
+        }
+        for (_, mut entries) in grouped {
+            entries.sort_by_key(|entry| entry.start);
+            let mut merged: Vec<crate::code::ExceptionEntry> = Vec::new();
+            for entry in entries {
+                let join = merged.last().map_or(false, |previous| {
+                    entry.start >= previous.end
+                        && instrs.iter().filter(|instruction| {
+                            instruction.offset >= previous.end && instruction.offset < entry.start
+                        }).all(|instruction| matches!(instruction.op,
+                            Op::SEND | Op::YIELD_VALUE | Op::RESUME | Op::RESUME_CHECK
+                            | Op::JUMP_BACKWARD_NO_INTERRUPT | Op::END_SEND
+                            | Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                });
+                if join {
+                    merged.last_mut().unwrap().end = entry.end;
+                } else {
+                    merged.push(entry);
+                }
+            }
+            exc_entries.extend(merged);
+        }
+        exc_entries.sort_by_key(|entry| entry.start);
     }
 
     // classify exception-table targets: handlers starting with PUSH_EXC_INFO
@@ -1047,11 +1092,22 @@ pub fn decompile_in_scope(
                                 | Op::CALL_FUNCTION
                                 | Op::RETURN_VALUE
                                 | Op::RETURN_CONST
+                                | Op::LOAD_SMALL_INT
+                                | Op::GET_AWAITABLE
+                                | Op::SEND
+                                | Op::END_SEND
+                                | Op::YIELD_VALUE
+                                | Op::YIELD_FROM
+                                | Op::RESUME
+                                | Op::RESUME_CHECK
+                                | Op::JUMP_BACKWARD_NO_INTERRUPT
                         ) || (x.op == Op::LOAD_CONST
                             && matches!(
                                 code.consts.get(x.arg as usize).map(|o| &**o),
                                 Some(PyObject::None)
-                            ))
+                            )) || (version.at_least(3, 14) && exc_entries.iter().any(|entry| {
+                                entry.start <= x.offset && x.offset < entry.end && entry.target != t
+                            }))
                     }) && gap.iter().any(|x| {
                         matches!(x.op, Op::RETURN_VALUE | Op::RETURN_CONST)
                     });
@@ -4746,6 +4802,18 @@ impl<'a> Ctx<'a> {
         // handler chain — statements AFTER the copy (post-try code inside
         // a loop iteration) belong to the main walk, not the finally
         let mut fin_span_stop = stop;
+        if self.version.at_least(3, 14)
+            && self.blocks.iter().any(|block| block.kind == BlockType::With)
+        {
+            if let Some(tail) = self.instrs.iter().enumerate().find_map(|(index, instruction)| {
+                if instruction.offset >= pos && instruction.offset < fin_span_stop
+                    && instruction.op == Op::SWAP && self.with_return_tail_end(index).is_some()
+                { Some(instruction.offset) } else { None }
+            }) {
+                stop = tail;
+                fin_span_stop = tail;
+            }
+        }
         // the inline-copy mirror verdict: false means the span at `pos`
         // does NOT opcode-mirror the finally chain's copy — there is no
         // inline copy here (an always-raising try body has no normal
@@ -5069,6 +5137,8 @@ impl<'a> Ctx<'a> {
                 let r = &self.instrs[ri];
                 if r.op == Op::RETURN_VALUE {
                     Some(r.end())
+                } else if self.version.at_least(3, 14) && r.op == Op::SWAP {
+                    self.with_return_tail_end(ri)
                 } else {
                     None
                 }
@@ -14797,6 +14867,7 @@ impl<'a> Ctx<'a> {
             | Op::COPY_DICT_WITHOUT_KEYS => {
                 if self.inline_comp.is_some()
                     && matches!(inst.op, Op::LIST_APPEND | Op::SET_ADD | Op::MAP_ADD)
+                    && (!self.version.at_least(3, 14) || arg >= 2)
                 {
                     self.comp_add_element(inst);
                 } else {
@@ -31631,6 +31702,26 @@ return None;
             .unwrap_or(false);
         if let Some(comp) = &mut self.inline_comp {
             if self.cur_offset < comp.end {
+                // A value-preserving COPY/TO_BOOL guard inside an element
+                // is an and/or expression, rather than a comprehension
+                // filter. Its fall-through discards the copied left value.
+                if let Some(&index) = self.idx_of.get(&self.cur_offset) {
+                    let mut previous = index;
+                    while previous > 0 && matches!(self.instrs[previous - 1].op,
+                        Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    { previous -= 1; }
+                    let copied = previous > 0
+                        && self.instrs[previous - 1].op == Op::COPY
+                        && self.instrs[previous - 1].arg == 1;
+                    let discard = self.instrs[index + 1..].iter()
+                        .find(|instruction| !matches!(instruction.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                        .map_or(false, |instruction| instruction.op == Op::POP_TOP);
+                    if copied && discard && target > self.cur_offset && target < comp.end {
+                        comp.pending_merges.push((target, cond,
+                            Some(if jump_if_true { BoolOpKind::Or } else { BoolOpKind::And })));
+                        return;
+                    }
+                }
                 // element ternary guard: same recognition as the
                 // code-object builder (a forward JF between the jump
                 // and its target skips the else arm to a merge, both
@@ -31670,7 +31761,7 @@ return None;
                                     });
                                 }
                             } else {
-                                comp.pending_merges.push((m_off, cj));
+                                comp.pending_merges.push((m_off, cj, None));
                                 comp.tern_chain_t = Some(t_off);
                             }
                             return;
@@ -46516,7 +46607,16 @@ impl<'a> Ctx<'a> {
             && star_args_none(&args)
             && args.iter().all(|a| matches!(&**a, Expr::Const(o) if matches!(&**o, PyObject::None)))
         {
-            self.with_exits -= 1;
+            // A constant early return has no SWAP-based return tail. Its
+            // copied __aexit__ call must not consume the enclosing with's
+            // bookkeeping needed by later branches and the final exit.
+            let early_exit = self.blocks.iter().any(|block| {
+                block.kind == BlockType::With && block.end > self.cur_offset
+            }) && matches!(self.blocks.last().map(|block| block.kind),
+                          Some(BlockType::If) | Some(BlockType::Else));
+            if !early_exit {
+                self.with_exits -= 1;
+            }
             let next_awaitable = self
                 .idx_of
                 .get(&self.cur_offset)
@@ -46941,7 +47041,13 @@ impl<'a> Ctx<'a> {
             && none_args
             && (func_is_none || func_is_underflow)
         {
-            self.with_exits -= 1;
+            let early_exit = self.blocks.iter().any(|block| {
+                block.kind == BlockType::With && block.end > self.cur_offset
+            }) && matches!(self.blocks.last().map(|block| block.kind),
+                          Some(BlockType::If) | Some(BlockType::Else));
+            if !early_exit {
+                self.with_exits -= 1;
+            }
             // async with (3.11+): the __aexit__ result is awaited right
             // after the swallowed call — the protocol has no awaitable on
             // our modeled stack, so drop it cleanly (no underflow)
@@ -50939,6 +51045,51 @@ impl<'a> Ctx<'a> {
 
 // =====================  comprehensions  =====================
 
+// The main statement parser already understands PEP 709's nested inline
+// comprehensions. Reuse it for generator elements instead of flattening an
+// inner dict/list/set comprehension into the generator's own clauses.
+fn generator_parts_from_body(
+    body: &[Stmt], generators: &mut Vec<Comprehension>,
+) -> Option<ExprRef> {
+    let mut result = None;
+    for statement in body {
+        match statement {
+            Stmt::For { target, iter, body, orelse, is_async } if orelse.is_empty() => {
+                generators.push(Comprehension {
+                    target: target.clone(), iter: iter.clone(), ifs: Vec::new(),
+                    is_async: *is_async, if_line_break: false,
+                });
+                result = generator_parts_from_body(body, generators);
+                if result.is_none() { return None; }
+            }
+            Stmt::If { cond, body, orelse } if orelse.is_empty() => {
+                generators.last_mut()?.ifs.push(cond.clone());
+                result = generator_parts_from_body(body, generators);
+                if result.is_none() { return None; }
+            }
+            Stmt::Expr(value) => {
+                match &**value {
+                    Expr::Yield(Some(value)) => {
+                        if result.is_some() { return None; }
+                        result = Some(value.clone());
+                    }
+                    Expr::Const(_) => {}, // Docstring.
+                    _ => return None,
+                }
+            }
+            Stmt::Pass | Stmt::Return(None) => {},
+            Stmt::Return(Some(value))
+                if matches!(&**value, Expr::Const(object) if matches!(&**object, PyObject::None)) => {},
+            Stmt::Assign { targets, value, .. }
+                if targets.len() == 1
+                    && matches!(&*targets[0], Expr::Name(name) if name == "__assert_armored__")
+                    && matches!(&**value, Expr::Const(_)) => {},
+            _ => return None,
+        }
+    }
+    result
+}
+
 impl<'a> Ctx<'a> {
     /// Try to turn a completed call into a comprehension. The callee is a
     /// Function whose code object is named `<listcomp>` etc. The iterable is
@@ -51185,6 +51336,20 @@ fn genexpr_ternary_merge(
     ) -> Option<(ExprRef, Option<ExprRef>, Vec<Comprehension>)> {
         let table = table_for(self.version).ok()?;
         let instrs = crate::bytecode::decode_instructions(code, table, self.version);
+
+        if self.version.at_least(3, 14) && matches!(_kind, CompKind::Generator)
+            && instrs.iter().any(|instruction| instruction.op == Op::LOAD_FAST_AND_CLEAR)
+        {
+            if let Ok(statements) = decompile(code, self.version) {
+                let mut generators = Vec::new();
+                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
+                    if !generators.is_empty() {
+                        generators[0].iter = outer_iter.clone();
+                        return Some((element, None, generators));
+                    }
+                }
+            }
+        }
 
         struct PartialGen {
             target: Option<ExprRef>,
@@ -51833,8 +51998,19 @@ fn genexpr_ternary_merge(
                         let v = stack.pop().unwrap_or_else(|| Rc::new(Expr::Name("?".to_string())));
                         (k, v)
                     };
-                    key.get_or_insert(k);
-                    elt.get_or_insert(v);
+                    if self.version.at_least(3, 14) && inst.arg == 1 {
+                        // Large dict displays use MAP_ADD 1 even inside a
+                        // comprehension. They build its element, rather
+                        // than setting the enclosing comprehension's key.
+                        let dictionary = stack.pop()?;
+                        let Expr::Dict(entries) = &*dictionary else { return None; };
+                        let mut entries = entries.clone();
+                        entries.push((k, v));
+                        stack.push(Rc::new(Expr::Dict(entries)));
+                    } else {
+                        key.get_or_insert(k);
+                        elt.get_or_insert(v);
+                    }
                 }
                 Op::YIELD_VALUE => {
                     if let Some(p) = pending_or_filter.take() {
@@ -52152,8 +52328,8 @@ fn genexpr_ternary_merge(
                     // `f(*t)` / `f(*a, **k)` element: [callable(+marker),
                     // args-iterable, (kwargs dict when arg&1)]
                     let underflow = || Rc::new(Expr::Name("?".to_string()));
-                    let star_kw = if inst.arg & 1 != 0 {
-                        stack.pop()
+                    let star_kw = if self.version.at_least(3, 14) || inst.arg & 1 != 0 {
+                        stack.pop().filter(|value| !is_null_marker(value))
                     } else {
                         None
                     };
@@ -52863,20 +53039,22 @@ impl<'a> Ctx<'a> {
         // arm-skip JFs all land on the append): fold them all,
         // innermost (LAST recorded) first so the stack pairs line up
         while let Some(idx) = self.inline_comp.as_ref().and_then(|c| {
-            c.pending_merges.iter().rposition(|(m, _)| *m == offset)
+            c.pending_merges.iter().rposition(|(m, _, _)| *m == offset)
         }) {
-            let (_, cond) = self
+            let (_, cond, bool_op) = self
                 .inline_comp
                 .as_mut()
                 .map(|c| c.pending_merges.remove(idx))
                 .unwrap();
             let else_v = self.pop_expr();
-            let then_v = self.pop_expr();
-            self.push(Rc::new(Expr::Ternary {
-                cond,
-                then_expr: then_v,
-                else_expr: else_v,
-            }));
+            if let Some(op) = bool_op {
+                self.push(Rc::new(Expr::BoolOp { op, values: vec![cond, else_v] }));
+            } else {
+                let then_v = self.pop_expr();
+                self.push(Rc::new(Expr::Ternary {
+                    cond, then_expr: then_v, else_expr: else_v,
+                }));
+            }
         }
     }
 

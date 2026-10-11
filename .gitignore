@@ -11,3 +11,4 @@ tools/ast_compare.pyc
 
 # real-world benchmark corpus (recreate with tools/fetch_realworld.sh)
 tests/realworld/
+/pycdc-x86_64-linux
