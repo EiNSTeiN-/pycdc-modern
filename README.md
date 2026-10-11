@@ -3,7 +3,9 @@
 This fork extends [ejfkdev/pycdc](https://github.com/ejfkdev/pycdc) for several
 CPython 3.14 constructs encountered during static source recovery:
 
-- Nested inline comprehensions inside generator elements reuse the main parser.
+- Python 3.14 generator elements reuse the main parser for nested inline
+  comprehensions, locals-plus slots and closure captures, including nested
+  generator calls with multiple captured cells.
 - Expanded generator calls consume Python 3.14's unconditional kwargs slot.
 - Await cleanup trampolines and fragmented exception regions stay out of source
   `try` blocks; returns remain inside their enclosing async context and `finally`.

@@ -42,6 +42,22 @@ class Python314RoundTrip(unittest.TestCase):
         rows, factory = [{'a': 2}, {'x': 5}], lambda **values: values
         self.assertEqual(recovered(rows, factory), original(rows, factory))
 
+    def test_nested_generator_global_call_preserves_callable(self):
+        original, recovered = self.recover(
+            'def select(rows):\n'
+            '    return sorted(sum(value for value in row) / len(row) for row in rows)\n')
+        rows = [[1, 2, 3], [5, 9], [3]]
+        self.assertEqual(recovered(rows), original(rows))
+
+    def test_nested_generator_captures_multiple_closure_cells(self):
+        original, recovered = self.recover(
+            'def select(rows):\n'
+            '    deltas = rows\n'
+            '    factory = sum\n'
+            '    return sorted(sum(factory(deltas) for _ in deltas) / len(deltas) for _ in range(3))\n')
+        rows = [1, 2, 4]
+        self.assertEqual(recovered(rows), original(rows))
+
     def test_async_context_with_guard_and_finally(self):
         original, recovered = self.recover(
             'async def select(manager, calculate):\n    async with manager:\n        if calculate is None:\n            return 3\n        try:\n            return await calculate()\n        finally:\n            last = False\n')

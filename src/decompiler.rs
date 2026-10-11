@@ -51045,9 +51045,10 @@ impl<'a> Ctx<'a> {
 
 // =====================  comprehensions  =====================
 
-// The main statement parser already understands PEP 709's nested inline
-// comprehensions. Reuse it for generator elements instead of flattening an
-// inner dict/list/set comprehension into the generator's own clauses.
+// The main statement parser understands PEP 709's inline comprehensions,
+// locals-plus loads and SET_FUNCTION_ATTRIBUTE closure captures. Reuse it
+// for 3.14 generators; the legacy simulator cannot safely flatten those
+// nested function calls into its own expression stack.
 fn generator_parts_from_body(
     body: &[Stmt], generators: &mut Vec<Comprehension>,
 ) -> Option<ExprRef> {
@@ -51337,9 +51338,7 @@ fn genexpr_ternary_merge(
         let table = table_for(self.version).ok()?;
         let instrs = crate::bytecode::decode_instructions(code, table, self.version);
 
-        if self.version.at_least(3, 14) && matches!(_kind, CompKind::Generator)
-            && instrs.iter().any(|instruction| instruction.op == Op::LOAD_FAST_AND_CLEAR)
-        {
+        if self.version.at_least(3, 14) && matches!(_kind, CompKind::Generator) {
             if let Ok(statements) = decompile(code, self.version) {
                 let mut generators = Vec::new();
                 if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
