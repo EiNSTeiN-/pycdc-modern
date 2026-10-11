@@ -67,6 +67,37 @@ class Python314RoundTrip(unittest.TestCase):
             self.assertEqual(asyncio.run(recovered(nullcontext(), function)),
                              asyncio.run(original(nullcontext(), function)))
 
+    def test_async_generator_try_except_else_finally(self):
+        original, recovered = self.recover(
+            'async def select(work, nested):\n'
+            '    if nested:\n'
+            '        try:\n            yield 3\n'
+            '        except BaseException:\n'
+            '            await work("rollback")\n            await work("release")\n            raise\n'
+            '        else:\n            await work("release")\n'
+            '        finally:\n            await work("finish")\n'
+            '        return\n'
+            '    yield 5\n')
+
+        async def exercise(function, nested, fail):
+            calls = []
+            async def work(operation):
+                calls.append(operation)
+            iterator = function(work, nested)
+            value = await anext(iterator)
+            if fail:
+                with self.assertRaises(RuntimeError):
+                    await iterator.athrow(RuntimeError('fixture'))
+            else:
+                with self.assertRaises(StopAsyncIteration):
+                    await anext(iterator)
+            return value, calls
+
+        for nested in (False, True):
+            for fail in (False, True):
+                self.assertEqual(asyncio.run(exercise(recovered, nested, fail)),
+                                 asyncio.run(exercise(original, nested, fail)))
+
     def test_short_circuit_inside_comprehension_element(self):
         original, recovered = self.recover(
             'def select(rows):\n    return [max(0.0, float(row.get("x") or 0.0)) for row in rows]\n')
