@@ -22,6 +22,9 @@ CPython 3.14 constructs encountered during static source recovery:
   are evaluated once, and NaN comparisons retain their original polarity.
   Extending an accumulated comparison chain retains every earlier operand;
   distinct calls in explicitly separate comparisons remain distinct.
+- Compiler StopIteration routes remain frame machinery when bounding lexical
+  handler chains. Shared continuations after handled exceptions stay outside
+  those chains, preserving later generator expressions and sequential work.
 
 Build with `cargo build --release --locked`. In addition to `cargo test`, run
 `PYCDC_BINARY=target/release/pycdc python3.14 tests/python314_roundtrip.py -v`.

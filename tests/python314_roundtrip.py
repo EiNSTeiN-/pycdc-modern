@@ -98,6 +98,29 @@ class Python314RoundTrip(unittest.TestCase):
                 self.assertEqual(asyncio.run(exercise(recovered, nested, fail)),
                                  asyncio.run(exercise(original, nested, fail)))
 
+    def test_sequential_async_handlers_resume_shared_tail(self):
+        original, recovered = self.recover(
+            'async def select(manager, work):\n    results = []\n'
+            '    try:\n        async with manager:\n            results.append(await work("first"))\n'
+            '    except ValueError:\n        results.append(2)\n'
+            '    results.extend(value for value in [3, 4])\n'
+            '    try:\n        async with manager:\n            results.append(await work("last"))\n'
+            '    except KeyError:\n        results.append(5)\n'
+            '    return results\n')
+        async def exercise(function, first_error, last_error):
+            calls = []
+            async def work(stage):
+                calls.append(stage)
+                error = first_error if stage == 'first' else last_error
+                if error:
+                    raise error('owned failure')
+                return 11 if stage == 'first' else 22
+            return await function(nullcontext(), work), calls
+        for first_error, last_error in ((None, None), (ValueError, None),
+                                         (None, KeyError), (ValueError, KeyError)):
+            self.assertEqual(asyncio.run(exercise(recovered, first_error, last_error)),
+                             asyncio.run(exercise(original, first_error, last_error)))
+
     def test_short_circuit_inside_comprehension_element(self):
         original, recovered = self.recover(
             'def select(rows):\n    return [max(0.0, float(row.get("x") or 0.0)) for row in rows]\n')
