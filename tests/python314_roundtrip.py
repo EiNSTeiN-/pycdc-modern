@@ -151,6 +151,42 @@ class Python314RoundTrip(unittest.TestCase):
         for value in (None, -1.0, 1.0, 16.0):
             self.assertEqual(recovered(value), original(value))
 
+    def test_multi_link_rejection_guard_keeps_every_operand_and_call(self):
+        original, recovered = self.recover(
+            'def select(first, second):\n'
+            '    if first is None or not 0.0 <= first() <= second() <= 15.0:\n'
+            '        return False\n    return True\n')
+        for first_value, second_value in ((1.0, 2.0), (-1.0, 2.0), (3.0, 2.0),
+                                          (2.0, 16.0), (float('nan'), 2.0), (2.0, float('nan'))):
+            results = []
+            for function in (original, recovered):
+                calls = []
+                def first():
+                    calls.append('first')
+                    return first_value
+                def second():
+                    calls.append('second')
+                    return second_value
+                results.append((function(first, second), calls))
+            self.assertEqual(results[1], results[0])
+        self.assertEqual(recovered(None, lambda: 5), original(None, lambda: 5))
+
+    def test_separate_comparisons_keep_distinct_calls(self):
+        original, recovered = self.recover(
+            'def select(value):\n'
+            '    if value is None or not (0.0 <= value() and value() <= 15.0):\n'
+            '        return False\n    return True\n')
+        results = []
+        for function in (original, recovered):
+            calls = []
+            values = iter((1.0, 16.0))
+            def value():
+                calls.append('value')
+                return next(values)
+            results.append((function(value), calls))
+        self.assertEqual(results[1], results[0])
+        self.assertEqual(results[0], (False, ['value', 'value']))
+
     def test_large_dictionary_literal_inside_comprehension(self):
         literal = ', '.join(f'"k{i}": row + {i}' for i in range(20))
         original, recovered = self.recover(f'def select(rows):\n    return [{{{literal}}} for row in rows]\n')

@@ -20,6 +20,8 @@ CPython 3.14 constructs encountered during static source recovery:
 - None-led rejection guards preserve all missing-value exits, negated chained
   comparisons, and shared continue/return blocks. Chained middle expressions
   are evaluated once, and NaN comparisons retain their original polarity.
+  Extending an accumulated comparison chain retains every earlier operand;
+  distinct calls in explicitly separate comparisons remain distinct.
 
 Build with `cargo build --release --locked`. In addition to `cargo test`, run
 `PYCDC_BINARY=target/release/pycdc python3.14 tests/python314_roundtrip.py -v`.

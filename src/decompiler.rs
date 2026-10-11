@@ -42126,7 +42126,8 @@ fn merge_chain_compare(cond: &ExprRef, v: &ExprRef) -> Option<ExprRef> {
     if o2.len() < 2 || ops2.len() + 1 != o2.len() {
         return None;
     }
-    let shared = match (&*operands[1], &*o2[0]) {
+    let last = operands.last()?;
+    let shared = match (&**last, &*o2[0]) {
         (Expr::Name(a), Expr::Name(b)) => a == b,
         (Expr::Const(c1), Expr::Const(c2)) => Rc::ptr_eq(c1, c2) || const_value_eq(c1, c2),
         (Expr::Attribute { value: v1, attr: a1 }, Expr::Attribute { value: v2, attr: a2 }) => {
@@ -42134,14 +42135,17 @@ fn merge_chain_compare(cond: &ExprRef, v: &ExprRef) -> Option<ExprRef> {
         }
         // calls/subscripts/etc: deep structural equality (side-effecting
         // operands must not be duplicated across the merged chain)
-        _ => expr_eq(&operands[1], &o2[0]),
+        _ => expr_eq(last, &o2[0]),
     };
     if !shared {
         return None;
     }
     let mut merged_ops = ops.clone();
     merged_ops.extend(ops2.iter().copied());
-    let mut merged_operands = vec![operands[0].clone()];
+    // Extend the complete accumulated chain, sharing only its last operand.
+    // Using operands[1] or retaining just operands[0] loses earlier links
+    // once the left side already contains more than two operands.
+    let mut merged_operands = operands[..operands.len() - 1].to_vec();
     merged_operands.extend(o2.iter().cloned());
     Some(Rc::new(Expr::Compare {
         operands: merged_operands,
