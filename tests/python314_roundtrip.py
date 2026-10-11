@@ -104,6 +104,53 @@ class Python314RoundTrip(unittest.TestCase):
         rows = [{'x': 7}, {'x': None}, {'x': -2}, {}]
         self.assertEqual(recovered(rows), original(rows))
 
+    def test_none_or_negated_chained_comparison_guard(self):
+        original, recovered = self.recover(
+            'def select(value):\n'
+            '    if value is None or not 0.0 <= value <= 15.0:\n        return False\n'
+            '    return True\n')
+        for value in (None, -1.0, 0.0, 10.0, 15.0, 16.0, float('nan')):
+            with self.subTest(value=value):
+                self.assertEqual(recovered(value), original(value))
+
+    def test_loop_guard_skips_every_missing_value(self):
+        original, recovered = self.recover(
+            'def select(rows):\n    result = []\n'
+            '    for row in rows:\n'
+            '        a = row.get("a")\n        b = row.get("b")\n'
+            '        c = row.get("c")\n        d = row.get("d")\n'
+            '        if a is None or b is None or c is None or d is None or d < 0.01:\n'
+            '            continue\n'
+            '        result.append(a + b + c + d)\n'
+            '    return result\n')
+        rows = [{}, {'a': 1}, {'a': 1, 'b': 2, 'c': 3, 'd': 0},
+                {'a': 1, 'b': 2, 'c': 3, 'd': 4}]
+        self.assertEqual(recovered(rows), original(rows))
+
+    def test_negated_chain_evaluates_middle_call_once(self):
+        original, recovered = self.recover(
+            'def select(value):\n'
+            '    if value is None or not 0.0 <= value() <= 15.0:\n        return False\n'
+            '    return True\n')
+        for number in (-1.0, 0.0, 15.0, 16.0, float('nan')):
+            results = []
+            for function in (original, recovered):
+                calls = []
+                def value():
+                    calls.append('evaluated')
+                    return number
+                results.append((function(value), calls))
+            self.assertEqual(results[1], results[0])
+            self.assertEqual(results[0][1], ['evaluated'])
+
+    def test_guard_does_not_absorb_later_constant_return(self):
+        original, recovered = self.recover(
+            'def select(value):\n'
+            '    if value is None or not 0.0 <= value <= 15.0:\n        return False\n'
+            '    return False\n')
+        for value in (None, -1.0, 1.0, 16.0):
+            self.assertEqual(recovered(value), original(value))
+
     def test_large_dictionary_literal_inside_comprehension(self):
         literal = ', '.join(f'"k{i}": row + {i}' for i in range(20))
         original, recovered = self.recover(f'def select(rows):\n    return [{{{literal}}} for row in rows]\n')

@@ -29125,6 +29125,16 @@ return None;
                 Op::PUSH_NULL => {
                     st.push(self.name_expr("\u{0}null"));
                 }
+                Op::COPY => {
+                    if arg == 0 || arg > st.len() { return None; }
+                    st.push(st[st.len() - arg].clone());
+                }
+                Op::SWAP => {
+                    if arg == 0 || arg > st.len() { return None; }
+                    let top = st.len() - 1;
+                    let other = st.len() - arg;
+                    st.swap(top, other);
+                }
                 Op::LOAD_ATTR | Op::LOAD_METHOD => {
                     let v = pop1(&mut st);
                     let idx = if ins.op == Op::LOAD_ATTR && self.version.at_least(3, 12) {
@@ -29953,9 +29963,149 @@ return None;
         Some(body_start)
     }
 
+    /// Recover a shared rejection block reached by a None-led OR guard.
+    /// CPython 3.14 puts the last test's success jump over the reject block.
+    /// Treating earlier None jumps as nested positive ifs loses rejection for
+    /// missing values. A negated comparison chain also has a POP_TOP cleanup
+    /// edge; retain its copied middle value to avoid evaluating it twice.
+    fn try_none_rejection_guard(
+        &self, first: &ExprRef, first_jump_true: bool, target: usize,
+    ) -> Option<(ExprRef, Vec<Stmt>, usize)> {
+        if !self.version.at_least(3, 14) || !self.stack.is_empty() || target <= self.cur_offset {
+            return None;
+        }
+        if !matches!(&**first, Expr::Compare { operands, ops }
+            if operands.len() == 2 && ops.len() == 1
+                && matches!(ops[0], CmpOp::Is | CmpOp::IsNot)
+                && matches!(&*operands[1], Expr::Const(value) if matches!(&**value, PyObject::None))) {
+            return None;
+        }
+        let padding = |op| matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::EXTENDED_ARG);
+        let skip_padding = |mut index: usize| {
+            while self.instrs.get(index).map_or(false, |item| padding(item.op)) { index += 1; }
+            index
+        };
+        let reject_index = skip_padding(*self.idx_of.get(&target)?);
+        let reject = self.instrs.get(reject_index)?;
+        let (body, end_index) = if reject.is_backward && matches!(reject.op, Op::JUMP_BACKWARD | Op::JUMP_BACKWARD_NO_INTERRUPT) {
+            let top = reject.target?;
+            if !self.blocks.iter().any(|block| matches!(block.kind, BlockType::For | BlockType::While)
+                && (block.start == top || block.cond_end == top)) { return None; }
+            (vec![Stmt::Continue], reject_index + 1)
+        } else if reject.op == Op::LOAD_CONST {
+            let ret = skip_padding(reject_index + 1);
+            if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
+            let value = self.code.consts.get(reject.arg as usize)?.clone();
+            (vec![Stmt::Return(Some(Rc::new(Expr::Const(value))))], ret + 1)
+        } else { return None; };
+        let equivalent_return = |index: usize| -> Option<usize> {
+            let Some(Stmt::Return(Some(expected))) = body.first() else { return None; };
+            let Expr::Const(expected) = &**expected else { return None; };
+            let item = self.instrs.get(index)?;
+            if item.op != Op::LOAD_CONST { return None; }
+            let actual = self.code.consts.get(item.arg as usize)?;
+            if !Rc::ptr_eq(expected, actual) && !const_value_eq(expected, actual) { return None; }
+            let ret = skip_padding(index + 1);
+            if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
+            Some(ret + 1)
+        };
+        let mut body_index = skip_padding(end_index);
+        // A failed chained link may pop its retained middle value before a
+        // compiler-generated duplicate return. The successful jump skips
+        // both return copies, not merely the first one.
+        if matches!(body.first(), Some(Stmt::Return(_))) {
+            loop {
+                let mut copy = body_index;
+                if self.instrs.get(copy).map_or(false, |item| item.op == Op::POP_TOP) {
+                    copy = skip_padding(copy + 1);
+                }
+                let Some(after_copy) = equivalent_return(copy) else { break; };
+                body_index = skip_padding(after_copy);
+            }
+        }
+        let body_start = self.instrs.get(body_index)?.offset;
+        let reaches_reject = |offset: usize| -> bool {
+            let Some(&start) = self.idx_of.get(&offset) else { return false; };
+            let mut index = skip_padding(start);
+            if self.instrs.get(index).map_or(false, |item| item.op == Op::POP_TOP) {
+                index = skip_padding(index + 1);
+            }
+            if index == reject_index { return true; }
+            if equivalent_return(index).is_some() { return true; }
+            if self.instrs.get(index).map_or(false, |item|
+                self.dup_copy_redirect.get(&item.offset).copied() == Some(reject.offset)) { return true; }
+            self.instrs.get(index).map_or(false, |item| item.op == Op::JUMP_FORWARD
+                && item.target.map_or(false, |dest| skip_padding(*self.idx_of.get(&dest).unwrap_or(&usize::MAX)) == reject_index))
+        };
+        let failure = |condition: ExprRef, truth: bool| -> ExprRef {
+            if truth { return condition; }
+            if let Expr::Compare { operands, ops } = &*condition {
+                if ops.len() == 1 && matches!(ops[0], CmpOp::Is | CmpOp::IsNot) {
+                    return Rc::new(Expr::Compare {
+                        operands: operands.clone(), ops: vec![if ops[0] == CmpOp::Is { CmpOp::IsNot } else { CmpOp::Is }],
+                    });
+                }
+            }
+            // Do not flip inequalities: NaN and custom rich comparisons
+            // make `not (a <= b)` different from `a > b`.
+            Rc::new(Expr::Unary { op: UnaryOp::Not, operand: condition })
+        };
+        let mut values = vec![failure(first.clone(), first_jump_true)];
+        let mut start = *self.idx_of.get(&self.cur_offset)? + 1;
+        let mut carried = Vec::new();
+        let mut complete = false;
+        while start < reject_index {
+            let mut end = start;
+            while end < reject_index && !matches!(self.instrs[end].op,
+                Op::POP_JUMP_IF_NONE | Op::POP_JUMP_IF_NOT_NONE | Op::POP_JUMP_IF_TRUE | Op::POP_JUMP_IF_FALSE) {
+                end += 1;
+            }
+            if end == reject_index { return None; }
+            let was_chain = !carried.is_empty();
+            carried = self.sim_stack_region(start, end, carried)?;
+            let value = carried.pop()?;
+            let jump = self.instrs[end];
+            let (condition, jump_true) = match jump.op {
+                Op::POP_JUMP_IF_NONE | Op::POP_JUMP_IF_NOT_NONE => (Rc::new(Expr::Compare {
+                    operands: vec![value, Rc::new(Expr::Const(Rc::new(PyObject::None)))],
+                    ops: vec![if jump.op == Op::POP_JUMP_IF_NONE { CmpOp::Is } else { CmpOp::IsNot }],
+                }), true),
+                Op::POP_JUMP_IF_TRUE => (value, true),
+                _ => (value, false),
+            };
+            let destination = jump.target?;
+            let member = if reaches_reject(destination) {
+                failure(condition, jump_true)
+            } else if destination == body_start && reaches_reject(self.instrs.get(end + 1)?.offset) {
+                complete = true;
+                failure(condition, !jump_true)
+            } else { return None; };
+            let merged = if was_chain {
+                match (values.last().map(|value| &**value), &*member) {
+                    (Some(Expr::Unary { op: UnaryOp::Not, operand: left }),
+                     Expr::Unary { op: UnaryOp::Not, operand: right }) => {
+                        merge_chain_compare(left, right).map(|operand| Rc::new(Expr::Unary { op: UnaryOp::Not, operand }))
+                    }
+                    _ => None,
+                }
+            } else { None };
+            if let Some(merged) = merged { values.pop(); values.push(merged); }
+            else { values.push(member); }
+            if complete { break; }
+            start = end + 1;
+        }
+        if !complete || !carried.is_empty() || values.len() < 2 { return None; }
+        Some((Rc::new(Expr::BoolOp { op: BoolOpKind::Or, values }), body, body_start))
+    }
+
     fn handle_cond_jump(&mut self, cond: ExprRef, jump_if_true: bool, target: usize) {
         // tail-duplicated body copy: aim the jump at the original body
         let target = self.dup_copy_redirect.get(&target).copied().unwrap_or(target);
+        if let Some((guard, body, resume)) = self.try_none_rejection_guard(&cond, jump_if_true, target) {
+            self.push_stmt(Stmt::If { cond: guard, body, orelse: Vec::new() });
+            self.skip_until = Some(resume);
+            return;
+        }
         let raw_target = target;
         // 3.8+ `continue` threading: the jump may land ON the loop's back
         // edge instruction instead of the loop top (3.10 `if a or b:

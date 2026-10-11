@@ -17,6 +17,9 @@ CPython 3.14 constructs encountered during static source recovery:
   being mistaken for filters.
 - Large dictionary displays inside comprehensions keep their own `MAP_ADD 1`
   operations.
+- None-led rejection guards preserve all missing-value exits, negated chained
+  comparisons, and shared continue/return blocks. Chained middle expressions
+  are evaluated once, and NaN comparisons retain their original polarity.
 
 Build with `cargo build --release --locked`. In addition to `cargo test`, run
 `PYCDC_BINARY=target/release/pycdc python3.14 tests/python314_roundtrip.py -v`.
