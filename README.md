@@ -9,6 +9,10 @@ CPython 3.14 constructs encountered during static source recovery:
 - Expanded generator calls consume Python 3.14's unconditional kwargs slot.
 - Await cleanup trampolines and fragmented exception regions stay out of source
   `try` blocks; returns remain inside their enclosing async context and `finally`.
+- Split exception/success/finally suites are reunited when the outer success
+  suite belongs to the single inner handler-bearing try. No statements are
+  replaced with synthetic exception behavior; candidates still require
+  separate bytecode verification.
 - Short-circuit values inside comprehension elements remain values rather than
   being mistaken for filters.
 - Large dictionary displays inside comprehensions keep their own `MAP_ADD 1`

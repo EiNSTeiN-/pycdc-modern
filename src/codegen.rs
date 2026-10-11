@@ -535,6 +535,27 @@ impl Printer {
                 orelse,
                 finalbody,
             } => {
+                // Exception-region reconstruction can split try/except from
+                // its success and finally suites. An else without handlers
+                // cannot belong to the outer try. Rejoin the single inner
+                // handler-bearing try, retaining every recovered statement.
+                if handlers.is_empty() && !orelse.is_empty() && !finalbody.is_empty()
+                    && body.len() == 1
+                {
+                    if let Stmt::Try {
+                        body: inner_body, handlers: inner_handlers,
+                        orelse: inner_else, finalbody: inner_finally,
+                    } = &body[0]
+                    {
+                        if !inner_handlers.is_empty() && inner_else.is_empty() && inner_finally.is_empty() {
+                            self.stmt(&Stmt::Try {
+                                body: inner_body.clone(), handlers: inner_handlers.clone(),
+                                orelse: orelse.clone(), finalbody: finalbody.clone(),
+                            });
+                            return;
+                        }
+                    }
+                }
                 // a bare `except:` must be last (and unique); drop extras
                 let mut handlers = handlers.clone();
                 handlers.sort_by_key(|h| if h.type_.is_none() { 1 } else { 0 });

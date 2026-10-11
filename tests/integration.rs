@@ -5,6 +5,30 @@ use pycdc::codegen::generate;
 use pycdc::decompiler::decompile;
 use pycdc::pyc::PycModule;
 
+#[test]
+fn reunite_split_except_else_finally_suites() {
+    use pycdc::ast::{ExceptHandler, Expr, Stmt};
+    use std::rc::Rc;
+    let name = |value: &str| Rc::new(Expr::Name(value.to_string()));
+    let inner = Stmt::Try {
+        body: vec![Stmt::Expr(name("work"))],
+        handlers: vec![ExceptHandler {
+            type_: Some(name("ValueError")), name: None,
+            body: vec![Stmt::Expr(name("handled"))], is_star: false,
+        }],
+        orelse: vec![], finalbody: vec![],
+    };
+    let outer = Stmt::Try {
+        body: vec![inner], handlers: vec![],
+        orelse: vec![Stmt::Expr(name("success"))],
+        finalbody: vec![Stmt::Expr(name("cleanup"))],
+    };
+    let data = std::fs::read(format!("{}/tests/pyc/hello.3.14.pyc", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let version = PycModule::from_bytes(&data).unwrap().version();
+    let source = generate(&[outer], version, true);
+    assert_eq!(source, "try:\n    work\nexcept ValueError:\n    handled\nelse:\n    success\nfinally:\n    cleanup\n");
+}
+
 fn decompile_fixture(name: &str) -> (String, bool) {
     let path = format!("{}/tests/pyc/{}", env!("CARGO_MANIFEST_DIR"), name);
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
