@@ -417,3 +417,17 @@ cover 900 paired active/inactive, missing/empty/invalid row, query failure and
 cancellation cases. All 57 Python behavior methods and 35 Rust tests pass.
 The full 274-module retention audit remains required before stable promotion
 or any new application coverage claim.
+
+Version 0.6.24 development consumes the exact saved COPY operand when a
+complete modern AND-in-OR value chain folds, preserving the callee/NULL and
+other argument prefix. Remaining OR links qualify only with their bounded
+COPY/TO_BOOL/true-jump-to-the-same-merge protocol and matching POP cleanup.
+Different branch targets and arbitrary statement control flow do not qualify.
+The old behavior left an extra argument or used None as a callee. Nine owned
+compound/simple/assigned value layouts now retain exact instruction and
+exception bytes, including method/subscript/call operands and multiple OR
+tails. Prefix controls preserve a genuinely separate first argument, ordered
+callbacks, and failure paths. Two methods cover 113 paired cases; the full
+Python behavior suite has 59 methods. Full corpus retention is still required
+before stable promotion or application coverage claims. No comparison rule
+is relaxed.

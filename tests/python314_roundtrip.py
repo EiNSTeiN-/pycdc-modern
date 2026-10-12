@@ -62,6 +62,77 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_compound_boolean_calls_keep_one_argument_and_original_value_order(self):
+        for expression in (
+            'bool((optimization and reasons) or rows)',
+            "bool((optimization and optimization['available']) or reasons)",
+            'bool((optimization and len(reasons)) or rows)',
+            "bool((optimization and optimization.get('available')) or reasons)",
+            "bool((optimization and optimization.get('available')) or reasons or rows or economics or mobility or comfort)",
+            "bool(reasons or rows or (optimization and optimization.get('available')) or economics or mobility or comfort)",
+            'bool(optimization or reasons or rows or economics or mobility or comfort)',
+            "bool(optimization and optimization.get('available'))",
+            "ASSIGN (optimization and optimization.get('available')) or reasons or rows or economics or mobility or comfort",
+        ):
+            if expression.startswith('ASSIGN '):
+                body = '    value = ' + expression.removeprefix('ASSIGN ') + '\n    return bool(value)\n'
+            else:
+                body = '    return ' + expression + '\n'
+            source = 'def select(optimization, reasons, rows, economics, mobility, comfort):\n' + body
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for arguments in (
+                ({}, [], [], None, None, None),
+                ({'available': True}, [], [], None, None, None),
+                ({'available': False}, [], [], None, None, None),
+                ({}, ['why'], [], None, None, None),
+                ({}, [], ['row'], None, None, None),
+                ({}, [], [], {'cost': 1}, None, None),
+                ({}, [], [], None, None, {'comfort': 1}),
+                ({'available': False}, ['why'], [], None, None, None),
+                ({'other': True}, [], [], None, None, None),
+            ):
+                outcomes = []
+                for function in (original, recovered):
+                    try:
+                        outcomes.append(('return', function(*arguments)))
+                    except Exception as error:
+                        outcomes.append(('error', type(error).__name__, str(error)))
+                self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_folded_boolean_operand_preserves_callee_and_other_argument_prefixes(self):
+        for expression in ('call(before(), (first() and second()) or last(), after())',
+                           'call(value, (value and second()) or last(), after())'):
+            source = ('def select(call, before, first, second, last, after, value):\n'
+                      '    return ' + expression + '\n')
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for first_value, second_value, final_value in ((0, 0, 3), (1, 2, 3), (1, 0, 3), ([], [2], [3])):
+                for failure in (None, 'second', 'last', 'after'):
+                    outcomes = []
+                    for function in (original, recovered):
+                        events = []
+                        def getter(label, returned):
+                            def get():
+                                events.append(label)
+                                if failure == label:
+                                    raise ValueError('owned ' + label)
+                                return returned
+                            return get
+                        def call(*arguments):
+                            events.append(('call', arguments))
+                            return arguments
+                        try:
+                            result = ('return', function(call, getter('before', 'prefix'),
+                                getter('first', first_value), getter('second', second_value),
+                                getter('last', final_value), getter('after', 'suffix'), first_value))
+                        except Exception as error:
+                            result = ('error', type(error).__name__, str(error))
+                        outcomes.append((result, events))
+                    self.assertEqual(outcomes[0], outcomes[1])
+
     def test_guarded_else_query_keeps_fallback_and_unassigned_local_paths(self):
         from types import SimpleNamespace
         for first in ('1', 'float(1)', "float(active['total'])"):

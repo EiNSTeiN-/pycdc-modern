@@ -26548,7 +26548,7 @@ impl<'a> Ctx<'a> {
         ))
     }
 
-    /// 3.14 value-position `A1 and ... An or C`: every operand carries its
+    /// 3.14 value-position `A1 and ... An or C1 or ... Cm`: each link carries its
     /// own COPY/TO_BOOL value-preserving idiom; the and-links PJIF to the
     /// or-continuation (this jump's target) and the LAST and-operand PJITs
     /// to the merge M; [target, M) evaluates C (t_pb f1/g_val 3.14: the
@@ -26640,8 +26640,9 @@ impl<'a> Ctx<'a> {
         if ands.len() < 2 {
             return None;
         }
-        // [target, m) is the or's second operand: a pure value region
-        // (its leading POP_TOP discards the arriving operand copy)
+        // [target, m) contains the remaining OR operands. Each non-final
+        // operand must use the same COPY/TO_BOOL/PJIT-to-M value protocol;
+        // arbitrary statement branches or other merge targets do not qualify.
         let mi = *self.idx_of.get(&m)?;
         if mi <= ti {
             return None;
@@ -26656,14 +26657,42 @@ impl<'a> Ctx<'a> {
         if cstart >= mi {
             return None;
         }
-        if !self.instrs[cstart..mi].iter().all(|x| {
-            x.target.is_none()
-                && (is_pure_value_op(x.op)
-                    || matches!(x.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::POP_TOP))
-        }) {
+        let mut or_tail = Vec::new();
+        let mut operand_start = cstart;
+        let mut k = cstart;
+        while k < mi {
+            let ins = self.instrs[k];
+            if is_pjit(ins.op) && idiom_link(k) {
+                if ins.target != Some(m)
+                    || self.instrs[k - 2].arg != 1
+                    || k - 2 <= operand_start
+                {
+                    return None;
+                }
+                or_tail.push(self.sim_value_region(operand_start, k - 2)?);
+                k += 1;
+                while k < mi && pad(self.instrs[k].op) {
+                    k += 1;
+                }
+                if k >= mi || self.instrs[k].op != Op::POP_TOP {
+                    return None;
+                }
+                k += 1;
+                operand_start = k;
+                continue;
+            }
+            if ins.target.is_some()
+                || !(is_pure_value_op(ins.op)
+                    || matches!(ins.op, Op::COPY | Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+            {
+                return None;
+            }
+            k += 1;
+        }
+        if operand_start >= mi {
             return None;
         }
-        let c = self.sim_value_region(cstart, mi)?;
+        or_tail.push(self.sim_value_region(operand_start, mi)?);
         let mut and_flat = Vec::new();
         for v in ands {
             flatten_boolop(v, BoolOpKind::And, &mut and_flat);
@@ -26674,7 +26703,9 @@ impl<'a> Ctx<'a> {
         }) as ExprRef;
         let mut or_flat = Vec::new();
         flatten_boolop(and, BoolOpKind::Or, &mut or_flat);
-        flatten_boolop(c, BoolOpKind::Or, &mut or_flat);
+        for value in or_tail {
+            flatten_boolop(value, BoolOpKind::Or, &mut or_flat);
+        }
         Some((
             Rc::new(Expr::BoolOp {
                 op: BoolOpKind::Or,
@@ -35426,9 +35457,19 @@ if split_cond {
         // !jump_if_true path only, where `c` is `cond` un-negated.
         if !jump_if_true {
             if let Some((merged, m)) = self.try_value_and_or_314(&c, target) {
-                self.push(merged);
-                                self.skip_until = Some(m);
-                return;
+                // COPY kept this exact operand below its consumed truth
+                // test. The folded expression already owns that value;
+                // leaving it live creates an extra call argument (or steals
+                // the caller's callee/NULL prefix). Consume only this saved
+                // operand, preserving every unrelated stack entry.
+                if self.stack.last().map_or(false, |value| {
+                    matches!(value, Sv::E(saved) if expr_eq(saved, &c))
+                }) {
+                    self.stack.pop();
+                    self.push(merged);
+                    self.skip_until = Some(m);
+                    return;
+                }
             }
         }
         // 3.12+ chained comparison: the then arm recomputes the next link
