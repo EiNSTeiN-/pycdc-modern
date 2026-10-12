@@ -48899,7 +48899,7 @@ fn p649_leaked_gate(e: &ExprRef) -> Option<i64> {
 /// statements, recursively — conditional annotations (`if TYPE_CHECKING:
 /// x: T`) leave their markers inside the nested block. A marker directly
 /// after `name = value` merges into `name: T = value`.
-fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>) {
+fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>, class_scope: bool) {
     let mut i = 0;
     while i < stmts.len() {
         let gate = match &stmts[i] {
@@ -48925,6 +48925,20 @@ fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>) {
                     annotation: ent.ann.clone(),
                     value: merged,
                 };
+                // A class's annotation registration gate is compiler-visible
+                // even when its condition was constant-folded. An unconditional
+                // source block retains that registration without emitting a
+                // runtime condition. Plain AnnAssign would lose the cell and
+                // the annotation function's guarded entries on recompilation.
+                let ann_stmt = if class_scope {
+                    Stmt::If {
+                        cond: Rc::new(Expr::Const(Rc::new(PyObject::True))),
+                        body: vec![ann_stmt],
+                        orelse: vec![],
+                    }
+                } else {
+                    ann_stmt
+                };
                 if has_value {
                     stmts.remove(i - 1);
                     stmts[i - 1] = ann_stmt;
@@ -48939,26 +48953,47 @@ fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>) {
             Stmt::If { body, orelse, .. }
             | Stmt::While { body, orelse, .. }
             | Stmt::For { body, orelse, .. } => {
-                p649_restore_gates(body, entries);
-                p649_restore_gates(orelse, entries);
+                p649_restore_gates(body, entries, class_scope);
+                p649_restore_gates(orelse, entries, class_scope);
             }
             Stmt::Try { body, handlers, orelse, finalbody, .. } => {
-                p649_restore_gates(body, entries);
+                p649_restore_gates(body, entries, class_scope);
                 for h in handlers.iter_mut() {
-                    p649_restore_gates(&mut h.body, entries);
+                    p649_restore_gates(&mut h.body, entries, class_scope);
                 }
-                p649_restore_gates(orelse, entries);
-                p649_restore_gates(finalbody, entries);
+                p649_restore_gates(orelse, entries, class_scope);
+                p649_restore_gates(finalbody, entries, class_scope);
             }
             _ => {}
         }
         i += 1;
     }
+    // Keep one readable registration block for consecutive gated fields.
+    // Each field still has its own compiler gate index in __annotate__.
+    if class_scope {
+        fn annotation_block(stmt: &Stmt) -> bool {
+            matches!(stmt, Stmt::If { cond, body, orelse }
+                if matches!(&**cond, Expr::Const(value) if matches!(&**value, PyObject::True))
+                    && orelse.is_empty() && !body.is_empty()
+                    && body.iter().all(|stmt| matches!(stmt, Stmt::AnnAssign { .. })))
+        }
+        let mut index = 1;
+        while index < stmts.len() {
+            if annotation_block(&stmts[index - 1]) && annotation_block(&stmts[index]) {
+                let Stmt::If { body: current, .. } = stmts.remove(index) else { unreachable!() };
+                if let Stmt::If { body, .. } = &mut stmts[index - 1] {
+                    body.extend(current);
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
 }
 
 /// 3.14 PEP 649: rebuild module/class-scope annotation statements from
 /// the compiler-generated `__annotate__` machinery (see P649Entry).
-fn restore_pep649_annotations(body: &mut Vec<Stmt>) {
+fn restore_pep649_annotations(body: &mut Vec<Stmt>, code: &CodeObject) {
     // 1) locate the pseudo def and extract its entries
     let mut entries: Vec<P649Entry> = Vec::new();
     let mut def_pos: Option<usize> = None;
@@ -49039,7 +49074,7 @@ fn restore_pep649_annotations(body: &mut Vec<Stmt>) {
 
     // 3) gated (module-scope) entries: replace their `{IDX}` markers,
     //    recursively through nested blocks
-    p649_restore_gates(body, &mut entries);
+    p649_restore_gates(body, &mut entries, code.name != "<module>" && code.flags & 1 == 0);
 
     // gated entries whose `{IDX}` marker never appeared were dead in the
     // executable flow (e.g. folded `if False:` bodies — the compiler drops
@@ -49248,7 +49283,7 @@ fn postprocess_body(mut body: Vec<Stmt>, code: &CodeObject, version: PythonVersi
     // `__annotate_func__`) instead of inline `__annotations__` subscript
     // stores. Restore them to AnnAssign statements and strip the
     // protocol remnants (see restore_pep649_annotations).
-    restore_pep649_annotations(&mut body);
+    restore_pep649_annotations(&mut body, code);
     // __module__ / __qualname__ / __doc__ handling for class bodies
     let mut idx = 0;
     while idx < body.len() {

@@ -30,6 +30,39 @@ class Python314RoundTrip(unittest.TestCase):
         exec(compile(result.stdout, 'recovered_fixture.py', 'exec'), recovered)
         return original['select'], recovered['select']
 
+    def test_constant_and_conditional_class_annotation_gates(self):
+        import types
+        original, recovered = self.recover(
+            'def select(enabled):\n    import annotationlib\n'
+            '    class Result:\n        "Documented result."\n'
+            '        if True:\n            amount: int = 3\n'
+            '        if enabled:\n            label: str = "ready"\n'
+            '        def read(self) -> int:\n            return self.amount\n'
+            '    return (Result.__doc__, Result().read(),\n'
+            '            annotationlib.get_annotations(Result, format=annotationlib.Format.STRING))\n')
+        for enabled in (False, True):
+            self.assertEqual(recovered(enabled), original(enabled))
+        def class_code(function):
+            return next(value for value in function.__code__.co_consts
+                        if isinstance(value, types.CodeType) and value.co_name == 'Result')
+        left, right = class_code(original), class_code(recovered)
+        self.assertEqual(right.co_cellvars, left.co_cellvars)
+        annotation = lambda code: next(value for value in code.co_consts
+                                       if isinstance(value, types.CodeType) and value.co_name == '__annotate__'
+                                       and '__conditional_annotations__' in value.co_freevars)
+        self.assertEqual(annotation(right).co_freevars, annotation(left).co_freevars)
+
+    def test_loop_class_annotations_preserve_registration_and_default_calls(self):
+        original, recovered = self.recover(
+            'def select(values):\n    import annotationlib\n    calls = []\n'
+            '    def default(value):\n        calls.append(value)\n        return value\n'
+            '    class Result:\n'
+            '        for value in values:\n            amount: int = default(value)\n'
+            '    return (calls, getattr(Result, "amount", None),\n'
+            '            annotationlib.get_annotations(Result, format=annotationlib.Format.STRING))\n')
+        for values in ([], [3], [2, 5]):
+            self.assertEqual(recovered(values), original(values))
+
     def test_nested_dictionary_comprehension_in_generator(self):
         original, recovered = self.recover(
             'def select(rows):\n    return tuple({key: row[key] for key in row} for row in rows)\n')

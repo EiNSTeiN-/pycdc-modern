@@ -25,6 +25,11 @@ CPython 3.14 constructs encountered during static source recovery:
 - Compiler StopIteration routes remain frame machinery when bounding lexical
   handler chains. Shared continuations after handled exceptions stay outside
   those chains, preserving later generator expressions and sequential work.
+- Deferred class annotations retain their registration gates on recompilation.
+  A constant-folded source block preserves the compiler's cell and guarded
+  annotation entries without introducing a runtime condition. Consecutive
+  fields share one block. Actual conditions, loops, default-value calls and
+  deferred annotation lookups are covered by owned behavior regressions.
 
 Build with `cargo build --release --locked`. In addition to `cargo test`, run
 `PYCDC_BINARY=target/release/pycdc python3.14 tests/python314_roundtrip.py -v`.
