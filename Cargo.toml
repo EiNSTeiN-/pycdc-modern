@@ -1,6 +1,6 @@
 [package]
 name = "pycdc"
-version = "0.6.22-einstein.1"
+version = "0.6.23-einstein.1"
 edition = "2021"
 rust-version = "1.70"
 authors = ["ejfkdev <152914458+ejfkdev@users.noreply.github.com>"]

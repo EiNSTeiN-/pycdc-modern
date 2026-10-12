@@ -395,3 +395,25 @@ return-after-inner-context controls keep their original placement.
 All 54 Python 3.14 methods, 35 Rust tests and 192 unpacker cases pass locally
 (one unpacker case remains an existing expected failure). Complete application
 retention remains required before stable promotion or new coverage claims.
+
+The complete 0.6.22 corpus gate passed: all 274 modules retain every prior
+raw and composite match, gaining 11 raw/10 composite units to reach
+13,849/14,291 composite matches. Version 0.6.22 is stable. The independently
+audited source API 0.4.29 then gains 39 more with zero losses, reaching
+13,888/14,291 and 132 complete candidate modules; comparison rules are
+unchanged throughout.
+
+Version 0.6.23 development retains guarded work inside a modern Else whose
+finite end is authoritatively established by the immediately preceding
+unconditional then-arm skip. An inner condition sharing that merge does not
+close the Else early. The old behavior could eject a queried row's guard and
+read that local on the other branch before assignment. Inferred boundaries,
+legacy versions and TryElse keep their prior handling.
+
+Eighteen owned literal/call/subscript and optional-fallback layouts compare
+exact instructions and exception tables. Five guard/query controls and one
+genuinely independent row guard keep their separate ownership. Three methods
+cover 900 paired active/inactive, missing/empty/invalid row, query failure and
+cancellation cases. All 57 Python behavior methods and 35 Rust tests pass.
+The full 274-module retention audit remains required before stable promotion
+or any new application coverage claim.

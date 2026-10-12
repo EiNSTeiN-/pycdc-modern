@@ -62,6 +62,121 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_guarded_else_query_keeps_fallback_and_unassigned_local_paths(self):
+        from types import SimpleNamespace
+        for first in ('1', 'float(1)', "float(active['total'])"):
+            for second in ('2', 'float(row[0])'):
+                for fallback in ('', '''    if value is None:
+        row = await owner.fallback()
+        if row and row[0] is not None:
+            value = float(row[0])
+''', '''    if value is None:
+        fallback_row = await owner.fallback()
+        if fallback_row and fallback_row[0] is not None:
+            value = float(fallback_row[0])
+'''):
+                    source = f'''async def select(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = {first}
+    else:
+        row = await owner.fetch()
+        if row and row[0] is not None:
+            value = {second}
+{fallback}    return value
+'''
+                    original, recovered = self.recover(source)
+                    self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                    self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                    for active in (False, True):
+                        for row in (None, (), (None,), (9,), (-2.5,), ('bad',)):
+                            for failure in (None, 'fetch', 'fallback', 'cancelled'):
+                                outcomes = []
+                                for function in (original, recovered):
+                                    events = []
+                                    async def query(kind):
+                                        events.append(kind)
+                                        if failure == kind:
+                                            raise ValueError('owned ' + kind)
+                                        if failure == 'cancelled':
+                                            raise asyncio.CancelledError('owned cancellation')
+                                        return row
+                                    async def fetch(): return await query('fetch')
+                                    async def fallback_query(): return await query('fallback')
+                                    owner = SimpleNamespace(active={'total': 8} if active else {},
+                                                            fetch=fetch, fallback=fallback_query)
+                                    try:
+                                        value = ('return', asyncio.run(function(owner)))
+                                    except (Exception, asyncio.CancelledError) as error:
+                                        value = ('error', type(error).__name__, str(error))
+                                    outcomes.append((value, events))
+                                self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_guarded_else_query_controls_keep_body_and_following_work(self):
+        from types import SimpleNamespace
+        for query, guard, suffix in (
+            ('await owner.fetch()', 'row', ''),
+            ('await owner.fetch()', 'row and row[0] is not None', ''),
+            ('owner.fetch_sync()', 'row and row[0] is not None', ''),
+            ('owner.row', 'row and row[0] is not None', ''),
+            ('await owner.fetch()', 'row and row[0] is not None',
+             "        owner.events.append('queried')\n"),
+        ):
+            source = f'''async def select(owner):
+    value = None
+    if owner.active:
+        value = 1
+    else:
+        row = {query}
+        if {guard}:
+            value = 2
+{suffix}    return value
+'''
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for active in (False, True):
+                for row in (None, (None,), (3,)):
+                    outcomes = []
+                    for function in (original, recovered):
+                        events = []
+                        def fetch_sync():
+                            events.append('fetch')
+                            return row
+                        async def fetch(): return fetch_sync()
+                        owner = SimpleNamespace(active=active, row=row, events=events,
+                                                fetch=fetch, fetch_sync=fetch_sync)
+                        outcomes.append((asyncio.run(function(owner)), events))
+                    self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_independent_query_result_guard_stays_outside_else(self):
+        from types import SimpleNamespace
+        source = '''async def select(owner):
+    value = None
+    row = None
+    if owner.active:
+        value = 1
+    else:
+        row = await owner.fetch()
+    if row and row[0] is not None:
+        value = 2
+    return value
+'''
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        for active in (False, True):
+            for row in (None, (None,), (3,)):
+                outcomes = []
+                for function in (original, recovered):
+                    events = []
+                    async def fetch():
+                        events.append('fetch')
+                        return row
+                    outcomes.append((asyncio.run(function(SimpleNamespace(active=active, fetch=fetch))), events))
+                self.assertEqual(outcomes[0], outcomes[1])
+
     def test_nested_context_computed_returns_keep_fetch_and_exit_order(self):
         for asynchronous in (False, True):
             for depth in (1, 2, 3):
