@@ -62,6 +62,58 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_computed_context_returns_after_handler_loops_keep_cleanup(self):
+        for asynchronous in (False, True):
+            for returned in ('result', 'len(result)', '{"rows": result}'):
+                source = ('async def' if asynchronous else 'def') + ' select(lock, rows, parse):\n'
+                source += ('    async with' if asynchronous else '    with') + ' lock:\n'
+                source += ('        result = []\n        for row in rows:\n'
+                           '            try:\n                result.append(parse(row))\n'
+                           '            except ValueError:\n                continue\n'
+                           '        return ' + returned + '\n')
+                original, recovered = self.recover(source)
+                self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                for rows in ([], [1, 2], [-1, 0, 3]):
+                    for mode in ('normal', 'rejected', 'failed', 'cancelled',
+                                 'open_error', 'exit_error', 'suppressed'):
+                        outcomes = []
+                        for function in (original, recovered):
+                            events = []
+                            class Lock:
+                                def __enter__(self):
+                                    events.append('enter')
+                                    if mode == 'open_error':
+                                        raise RuntimeError('owned enter')
+                                    return self
+                                def __exit__(self, kind, value, traceback):
+                                    events.append(('exit', kind.__name__ if kind else None))
+                                    if mode == 'exit_error':
+                                        raise RuntimeError('owned exit')
+                                    return mode == 'suppressed'
+                                async def __aenter__(self):
+                                    return self.__enter__()
+                                async def __aexit__(self, kind, value, traceback):
+                                    return self.__exit__(kind, value, traceback)
+                            def parse(value):
+                                events.append(('parse', value))
+                                if mode == 'rejected' and value <= 1:
+                                    raise ValueError('owned rejected row')
+                                if mode in ('failed', 'suppressed'):
+                                    raise RuntimeError('owned body')
+                                if mode == 'cancelled':
+                                    raise asyncio.CancelledError('owned cancellation')
+                                return value * 2
+                            try:
+                                value = function(Lock(), rows, parse)
+                                result = ('return', asyncio.run(value) if asynchronous else value)
+                            except (RuntimeError, asyncio.CancelledError) as error:
+                                result = (type(error).__name__, str(error))
+                            outcomes.append((result, events))
+                        with self.subTest(asynchronous=asynchronous, returned=returned,
+                                          rows=rows, mode=mode):
+                            self.assertEqual(outcomes[1], outcomes[0])
+
     def test_sunk_async_context_exits_keep_early_returns_and_cleanup(self):
         branches = (
             'if pending:\n            return False',

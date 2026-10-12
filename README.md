@@ -335,3 +335,20 @@ any earlier incomplete diagnostic. The Python 3.14 suite has 50 methods with
 120 paired async return/error/suppression/cancellation cases and chained
 dict-key/value/list arithmetic and side-effect controls. Full corpus retention
 remains required before advancing the stable branch or claiming new coverage.
+
+The complete `substantive-values-01` audit with unpacker 0.4.27 passed that
+gate: 13,821/14,291 application units match, 120 candidate modules are complete,
+and raw/composite views each gain 14 units with no lost matches. Backend 0.6.19
+has therefore advanced to the stable branch; these figures include the source
+repair trials and are not a claim of complete application recovery.
+
+Version 0.6.20 development folds a computed context return while its With
+block is still open. Out-of-line loop handlers can extend that region beyond
+the normal return tail; simulating its exit slots then emitted a bogus call
+to None and discarded the returned result. The existing pure exit-protocol
+matcher must prove the complete tail before the open With can close and carry
+its value. Owned synchronous and asynchronous loop fixtures verify exact
+instructions and exception tables for list, scalar and mapping returns, with
+126 paired normal, rejected-row, body-error, entry/exit-error, suppression and
+cancellation cases. A complete application retention gate remains required
+before promoting this development version.

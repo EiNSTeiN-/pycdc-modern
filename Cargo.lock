@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "pycdc"
-version = "0.6.19-einstein.1"
+version = "0.6.20-einstein.1"
 dependencies = [
  "serde",
  "serde_json",
