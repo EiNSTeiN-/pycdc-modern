@@ -368,3 +368,30 @@ exact instruction and exception bytes and 45 paired normal/error cases, includin
 preserved outer locals and genuine empty/default-free iterable controls. The
 Python 3.14 suite now contains 52 methods. Full application retention remains
 required before advancing this version to the stable branch.
+
+The complete `comprehension-defaults-01` audit passed that gate: raw and
+composite source each gained one unit with no losses across 274 modules,
+reaching 13,825/14,291 composite matches. Version 0.6.21 is stable. The
+subsequent source-API 0.4.28 `shared-guards-01` audit adds 14 further units
+without losses, reaching 13,839/14,291 and 123 complete candidate modules.
+
+Version 0.6.22 development distinguishes an enclosing for-loop back edge
+from a rotated while condition when reconstructing disjunctions. A known
+nearest For header can terminate the existing arm; backward edges into a
+condition or nearest While retain the previous veto. Eleven owned layouts
+check exact instruction and exception bytes and 41 paired short-circuit,
+missing/nonnumeric, break/else, continue and genuine while cases.
+
+Computed returns spanning nested context exits retain one carried value
+across the complete modern SWAP/None/call/await/pop groups, bounded by known
+exit slots. The return belongs in the innermost closed context body when
+the enclosing contexts remain open. Those outer blocks and slots remain
+available to their exception-suppression paths; closing them prematurely
+emits stray protocol calls. Owned one/two/three-level synchronous and async
+fixtures cover scalar, tuple, mapping and awaited results, with 168 paired
+normal, entry/body/exit error, suppression and cancellation cases. Separate
+return-after-inner-context controls keep their original placement.
+
+All 54 Python 3.14 methods, 35 Rust tests and 192 unpacker cases pass locally
+(one unpacker case remains an existing expected failure). Complete application
+retention remains required before stable promotion or new coverage claims.

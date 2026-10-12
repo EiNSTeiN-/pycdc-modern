@@ -62,6 +62,140 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_nested_context_computed_returns_keep_fetch_and_exit_order(self):
+        for asynchronous in (False, True):
+            for depth in (1, 2, 3):
+                expressions = ('value()', '(value(),)', '{"rows": value()}')
+                if asynchronous: expressions += ('await value()',)
+                for returned in expressions:
+                    prefix = 'async ' if asynchronous else ''
+                    source = prefix + 'def select(contexts, value):\n'
+                    for index in range(depth):
+                        source += '    ' * (index + 1) + prefix + 'with contexts[' + str(index) + ']:\n'
+                    source += '    ' * (depth + 1) + 'return ' + returned + '\n'
+                    original, recovered = self.recover(source)
+                    self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                    self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                    for failure in (None, 'body', 'enter-0', 'enter-1', 'exit-0', 'exit-1', 'suppressed', 'cancelled'):
+                        outcomes = []
+                        for function in (original, recovered):
+                            events = []
+                            opened = set()
+                            class Context:
+                                def __init__(self, index): self.index = index
+                                def __enter__(self):
+                                    events.append(('enter', self.index))
+                                    if failure == 'enter-' + str(self.index):
+                                        raise ValueError('entry')
+                                    opened.add(self.index)
+                                    return self
+                                def __exit__(self, *error):
+                                    events.append(('exit', self.index, error[0].__name__ if error[0] else None))
+                                    opened.remove(self.index)
+                                    if failure == 'exit-' + str(self.index):
+                                        raise ValueError('exit')
+                                    return failure == 'suppressed' and error[0] is ValueError
+                                async def __aenter__(self): return self.__enter__()
+                                async def __aexit__(self, *error): return self.__exit__(*error)
+                            def value():
+                                events.append(('value', tuple(sorted(opened))))
+                                if failure in ('body', 'suppressed'):
+                                    raise ValueError('body')
+                                if failure == 'cancelled':
+                                    raise asyncio.CancelledError('cancelled')
+                                return 7
+                            async def async_value(): return value()
+                            contexts = [Context(index) for index in range(depth)]
+                            try:
+                                output = function(contexts, async_value if returned.startswith('await ') else value)
+                                if asynchronous: output = asyncio.run(output)
+                                result = ('return', output)
+                            except (ValueError, asyncio.CancelledError) as error:
+                                result = ('error', str(error))
+                            outcomes.append((result, events, tuple(sorted(opened))))
+                        self.assertEqual(outcomes[0], outcomes[1])
+        for source in (
+            '''def select(contexts, value):
+    with contexts[0]:
+        with contexts[1]:
+            result = value()
+        return result
+''',
+            '''async def select(contexts, value):
+    async with contexts[0]:
+        async with contexts[1]:
+            result = await value()
+        return result
+''',
+        ):
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+
+    def test_negated_disjunction_in_for_body_keeps_else_and_short_circuit(self):
+        for condition in ('not test(value) or value < 0.2',
+                          'not value or value < 0.2',
+                          'value is None or value < 0.2',
+                          'test(value) or value < 0.2'):
+            for with_else in (False, True):
+                source = ('def select(values, test):\n    result = []\n    for value in values:\n'
+                    '        if ' + condition + ':\n            result.append("dry")\n')
+                if with_else:
+                    source += '        else:\n            result.append("wet")\n'
+                source += '    return result\n'
+                original, recovered = self.recover(source)
+                self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                for values in ([], [0.1, 0.3, 0.1], [None, 0.1, 0.3], ['dry', 0.3]):
+                    outputs = []
+                    for function in (original, recovered):
+                        events = []
+                        def test(value):
+                            events.append(value)
+                            return isinstance(value, (int, float))
+                        try:
+                            result = ('return', function(values, test))
+                        except TypeError as error:
+                            result = ('error', str(error))
+                        outputs.append((result, events))
+                    self.assertEqual(outputs[0], outputs[1])
+        for source in (
+            '''def select(values, test):
+    result = []
+    value = len(values)
+    while value < 2 or value == 3:
+        result.append(value)
+        value += 2
+    return result
+''',
+            '''def select(values, test):
+    result = []
+    for value in values:
+        if not test(value) or value < 0.2:
+            break
+        else:
+            result.append(value)
+    else:
+        result.append('complete')
+    result.append('tail')
+    return result
+''',
+            '''def select(values, test):
+    result = []
+    for value in values:
+        if not test(value) or value < 0.2:
+            continue
+        result.append(value)
+    return result
+''',
+        ):
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for values in ([], [0.1, 0.3, 3], [2, 4]):
+                self.assertEqual(original(values, lambda value: True),
+                                 recovered(values, lambda value: True))
+
     def test_empty_default_arguments_are_not_comprehension_accumulators(self):
         expressions = (
             '{field for row in rows for field in row.get("values", {})}',
