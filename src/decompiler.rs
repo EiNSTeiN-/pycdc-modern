@@ -21282,7 +21282,10 @@ let reopen = self
             let group = std::mem::take(&mut self.pending_stores);
             self.last_store_line = None;
             self.pending_unpack_wrap.clear();
-            let all_same = group.windows(2).all(|w| expr_eq(&w[0].1, &w[1].1));
+            // COPY/DUP preserves the identity of one evaluated stack value.
+            // Structurally equal expressions can be independent evaluations:
+            // `left, right = read(), read()` must still call read twice.
+            let all_same = group.windows(2).all(|w| Rc::ptr_eq(&w[0].1, &w[1].1));
             if all_same {
                 let value = group[0].1.clone();
                 let targets: Vec<ExprRef> = group.iter().map(|(t, _)| t.clone()).collect();
@@ -23302,13 +23305,19 @@ impl<'a> Ctx<'a> {
         // so offsets inside a cached instruction have no idx_of entry
         // either - a back edge landing <=8 bytes before the loop top
         // would falsely match a CACHE tail (compileall 3.13 main tore
-        // into an INCOMPLETE stub). The EXTENDED_ARG-prefix shape this
-        // recognizes is pre-3.11 wordcode only (no CACHE gaps).
-        if self.version.at_least(3, 11) {
-            return false;
-        }
+        // into an INCOMPLETE stub). Modern offsets therefore need proof from
+        // original bytes, rather than absence from the instruction map.
         if t >= start || start - t > 8 {
             return false;
+        }
+        if self.version.at_least(3, 11) {
+            if t % 2 != 0 || start % 2 != 0 {
+                return false;
+            }
+            if !(t..start).step_by(2).all(|offset| self.code.code.get(offset)
+                .map_or(false, |byte| self.table.op(*byte) == Op::EXTENDED_ARG)) {
+                return false;
+            }
         }
         // no instruction STARTS at t (idx_of also maps END offsets: the
         // preceding instruction's end lands on t and must not count as
@@ -29187,6 +29196,16 @@ return None;
                     if arg == 0 || arg > st.len() { return None; }
                     st.push(st[st.len() - arg].clone());
                 }
+                Op::STORE_FAST => {
+                    // A walrus stores a COPY of the value still on top of the
+                    // expression stack. Standalone assignment is a statement.
+                    let value = st.pop()?;
+                    let surviving = st.last_mut()?;
+                    if !Rc::ptr_eq(surviving, &value) { return None; }
+                    *surviving = Rc::new(Expr::Named {
+                        target: self.name_expr(self.local_name(arg)), value,
+                    });
+                }
                 Op::SWAP => {
                     if arg == 0 || arg > st.len() { return None; }
                     let top = st.len() - 1;
@@ -29230,7 +29249,7 @@ return None;
                                 st.pop();
                                 let decoded = decompile(&code, self.version).ok()?;
                                 let mut generators = Vec::new();
-                                let element = generator_parts_from_body(&decoded.body, &mut generators)?;
+                                let element = generator_parts_from_body(&decoded.body, &mut generators, &code.freevars)?;
                                 generators.first_mut()?.iter = outer;
                                 st.push(Rc::new(Expr::Comprehension {
                                     kind: CompKind::Generator, elt: element, key: None, generators,
@@ -42980,33 +42999,30 @@ fn simplify_not(e: ExprRef) -> ExprRef {
     }
 }
 
-/// 3.14: extended slices arrive as `slice(a, b, c)` calls or marshalled
-/// slice constants; normalize both to Expr::Slice.
+/// Extended indexes can contain actual marshalled slice constants. Preserve
+/// runtime slice calls: their global lookup may be shadowed or have effects.
 fn normalize_slice_call(idx: ExprRef) -> ExprRef {
+    normalize_slice_constant(idx)
+}
+
+/// Normalize actual marshalled slice values inside multi-axis indexes.
+/// A runtime `slice(...)` call must retain its global lookup and evaluation.
+fn normalize_slice_constant(idx: ExprRef) -> ExprRef {
     match &*idx {
-        Expr::Call { func, args, keywords, star_args: None, star_kwargs: None }
-            if keywords.is_empty()
-                && matches!(&**func, Expr::Name(n) if n == "slice")
-                && (2..=3).contains(&args.len())
-                // a starred operand (`slice(*argvals, None)`) cannot be a
-                // slice display — keep the call (yt-dlp jsinterp
-                // `obj[*argvals:]` was not valid source)
-                && args.iter().all(|a| !matches!(&**a, Expr::Starred(_))) =>
-        {
-            Rc::new(Expr::Slice(Box::new(SliceExpr {
-                start: none_if_const_none(args[0].clone()),
-                stop: none_if_const_none(args[1].clone()),
-                step: args.get(2).cloned().and_then(none_if_const_none),
-            })))
-        }
-        Expr::Const(o) => match &**o {
-            PyObject::Slice(a, b, c) => Rc::new(Expr::Slice(Box::new(SliceExpr {
-                start: none_if_const_const(a.clone()),
-                stop: none_if_const_const(b.clone()),
-                step: none_if_const_const(c.clone()),
+        Expr::Const(object) => match &**object {
+            PyObject::Slice(start, stop, step) => Rc::new(Expr::Slice(Box::new(SliceExpr {
+                start: none_if_const_const(start.clone()),
+                stop: none_if_const_const(stop.clone()),
+                step: none_if_const_const(step.clone()),
             }))),
+            PyObject::Tuple(values) if values.iter().any(|value| matches!(&**value, PyObject::Slice(_ , _, _))) =>
+                Rc::new(Expr::Tuple(values.iter().cloned()
+                    .map(|value| normalize_slice_constant(Rc::new(Expr::Const(value)))).collect())),
             _ => idx,
         },
+        Expr::Tuple(values) => Rc::new(Expr::Tuple(
+            values.iter().cloned().map(normalize_slice_constant).collect(),
+        )),
         _ => idx,
     }
 }
@@ -51592,7 +51608,7 @@ impl<'a> Ctx<'a> {
 // for 3.14 generators; the legacy simulator cannot safely flatten those
 // nested function calls into its own expression stack.
 fn generator_parts_from_body(
-    body: &[Stmt], generators: &mut Vec<Comprehension>,
+    body: &[Stmt], generators: &mut Vec<Comprehension>, freevars: &[String],
 ) -> Option<ExprRef> {
     let mut result = None;
     for statement in body {
@@ -51602,7 +51618,7 @@ fn generator_parts_from_body(
                     target: target.clone(), iter: iter.clone(), ifs: Vec::new(),
                     is_async: *is_async, if_line_break: false,
                 });
-                result = generator_parts_from_body(body, generators);
+                result = generator_parts_from_body(body, generators, freevars);
                 if result.is_none() { return None; }
             }
             // 3.14 filters reject an iteration via a forward conditional
@@ -51618,7 +51634,7 @@ fn generator_parts_from_body(
             }
             Stmt::If { cond, body, orelse } if orelse.is_empty() => {
                 generators.last_mut()?.ifs.push(cond.clone());
-                result = generator_parts_from_body(body, generators);
+                result = generator_parts_from_body(body, generators, freevars);
                 if result.is_none() { return None; }
             }
             Stmt::Expr(value) => {
@@ -51631,6 +51647,10 @@ fn generator_parts_from_body(
                     _ => return None,
                 }
             }
+            // Generator walrus targets bind real outer cells. The expression
+            // retains STORE_DEREF; this declaration is supplied by its parent
+            // source scope. Never discard globals or unrelated declarations.
+            Stmt::Nonlocal(names) if names.iter().all(|name| freevars.contains(name)) => {},
             Stmt::Pass | Stmt::Return(None) => {},
             Stmt::Return(Some(value))
                 if matches!(&**value, Expr::Const(object) if matches!(&**object, PyObject::None)) => {},
@@ -51642,6 +51662,23 @@ fn generator_parts_from_body(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod generator_declaration_tests {
+    use super::*;
+
+    #[test]
+    fn only_actual_nonlocal_cells_can_be_omitted_from_generator_expression_body() {
+        let yielded = Stmt::Expr(Rc::new(Expr::Yield(Some(Rc::new(Expr::Const(
+            Rc::new(PyObject::None),
+        ))))));
+        let accepted = vec![Stmt::Nonlocal(vec!["change".into()]), yielded.clone()];
+        assert!(generator_parts_from_body(&accepted, &mut Vec::new(), &["change".into()]).is_some());
+        assert!(generator_parts_from_body(&accepted, &mut Vec::new(), &[]).is_none());
+        let global = vec![Stmt::Global(vec!["change".into()]), yielded];
+        assert!(generator_parts_from_body(&global, &mut Vec::new(), &["change".into()]).is_none());
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -51894,7 +51931,7 @@ fn genexpr_ternary_merge(
         if self.version.at_least(3, 14) && matches!(_kind, CompKind::Generator) {
             if let Ok(statements) = decompile(code, self.version) {
                 let mut generators = Vec::new();
-                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
+                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators, &code.freevars) {
                     if !generators.is_empty() {
                         generators[0].iter = outer_iter.clone();
                         return Some((element, None, generators));

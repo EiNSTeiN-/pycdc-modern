@@ -62,6 +62,120 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_walrus_rejection_guard_keeps_one_assignment_and_short_circuit(self):
+        source = ('def select(entity_id, get):\n'
+                  '    if not entity_id or (state := get(entity_id)) is None:\n'
+                  '        return None\n    return state.value\n')
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        from types import SimpleNamespace
+        for entity in ('', None, 'sensor'):
+            for value in (None, SimpleNamespace(value=0), SimpleNamespace(value=7)):
+                for failure in (False, True):
+                    outcomes = []
+                    for function in (original, recovered):
+                        events = []
+                        def get(key):
+                            events.append(key)
+                            if failure: raise ValueError('owned lookup')
+                            return value
+                        try: result = ('value', function(entity, get))
+                        except ValueError as error: result = (type(error).__name__, str(error))
+                        outcomes.append((result, events))
+                    self.assertEqual(outcomes[1], outcomes[0])
+
+    def test_extended_for_iter_prefix_keeps_handler_owned_continue(self):
+        for size in (1, 30, 60):
+            source = ('def select(rows, work):\n    result = []\n    for row in rows:\n'
+                      '        try:\n' + '            work(row)\n' * size +
+                      '        except ValueError:\n            continue\n'
+                      '        result.append(row)\n    return result\n')
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for failure in (None, ValueError, RuntimeError):
+                outcomes = []
+                for function in (original, recovered):
+                    events = []
+                    def work(row):
+                        events.append(row)
+                        if row == 2 and failure: raise failure('owned work')
+                    try: result = ('value', function([1, 2, 3], work))
+                    except RuntimeError as error: result = (type(error).__name__, str(error))
+                    outcomes.append((result, events))
+                with self.subTest(size=size, failure=failure):
+                    self.assertEqual(outcomes[1], outcomes[0])
+
+    def test_independent_equal_assignments_keep_both_evaluations_and_true_chains(self):
+        sources = (
+            'def select(read):\n    left, right = read(), read()\n    return left, right\n',
+            'def select(read):\n    left = right = read()\n    return left, right\n',
+            'def select(read):\n    left, right = None, None\n    return left, right\n',
+            'def select(read):\n    right = left = None\n    return left, right\n',
+        )
+        for index, source in enumerate(sources):
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for failure_at in (None, 1, 2):
+                outcomes = []
+                for function in (original, recovered):
+                    events = []
+                    def read():
+                        events.append(len(events) + 1)
+                        if events[-1] == failure_at: raise ValueError('owned evaluation')
+                        return events[-1]
+                    try: result = ('value', function(read))
+                    except ValueError as error: result = (type(error).__name__, str(error))
+                    outcomes.append((result, events))
+                with self.subTest(source=index, failure_at=failure_at):
+                    self.assertEqual(outcomes[1], outcomes[0])
+            if index == 0:
+                counter = iter((7, 8))
+                self.assertEqual(recovered(lambda: next(counter)), (7, 8))
+
+    def test_multi_axis_slice_constants_and_real_slice_calls_keep_global_lookup(self):
+        for expression in ('data[:stop, :]', 'data[:, :]', 'data[1:stop:2, :, 7]',
+                           'data[slice(None, stop, None)]',
+                           'data[slice(None, stop, None), :]'):
+            source = f'def select(data, stop):\n    return {expression}\n'
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for shadow in (False, True):
+                results = []
+                for function in (original, recovered):
+                    events = []
+                    class Data:
+                        def __getitem__(self, index): events.append(('index', index)); return index
+                    def alternate(*arguments):
+                        events.append(('slice', arguments))
+                        raise ValueError('owned shadowed slice')
+                    if shadow: function.__globals__['slice'] = alternate
+                    else: function.__globals__.pop('slice', None)
+                    try: result = ('value', function(Data(), 5))
+                    except ValueError as error: result = (type(error).__name__, str(error))
+                    results.append((result, events))
+                with self.subTest(expression=expression, shadow=shadow):
+                    self.assertEqual(results[1], results[0])
+
+    def test_generator_walrus_and_keeps_outer_cell_and_value_short_circuit(self):
+        source = ('def select(rows):\n'
+                  '    return tuple(isinstance(row, dict) and '\
+                  '(change := row.get("change")) is not None and change >= 0 for row in rows)\n')
+        original, recovered = self.check_generator_bytes(source)
+        self.assertEqual(original.__code__.co_cellvars, recovered.__code__.co_cellvars)
+        for values in ([], [None], [{}], [{'change': None}], [{'change': -1}],
+                       [{'change': 0}, {'change': 7}, {'change': -3}, None],
+                       [{'change': 'invalid'}]):
+            outcomes = []
+            for function in (original, recovered):
+                try: result = ('value', function(values))
+                except TypeError as error: result = (type(error).__name__, str(error))
+                outcomes.append(result)
+            self.assertEqual(outcomes[1], outcomes[0])
+
     def check_generator_bytes(self, source):
         import types
         code = compile(source, 'owned-original', 'exec')

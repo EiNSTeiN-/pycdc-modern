@@ -273,3 +273,29 @@ Its blanket inner-cleanup suppression was rejected at the retention gate, even
 though its initial owned tests and CI passed. The 0.6.15 correction models the
 missing iterator instead. Never publish a recovered-source checkpoint based
 only on net gains or successful tests; require set-wise retention as well.
+
+### Python 3.14 expression identity and exact loop targets
+
+The 0.6.16 investigation checkpoint fixes five independently reproduced defects:
+
+- Consecutive assignment stores use evaluated-value identity, rather than AST
+  equality, to recognize a true chained assignment. Two equal calls remain two
+  evaluations; COPY-derived chains still evaluate once.
+- Actual slice constants in multi-axis indexes become colon syntax, including
+  constant tuples. Runtime `slice(...)` calls retain their global lookup, which
+  may be shadowed or have effects.
+- A generator's real nonlocal cell declarations no longer force a legacy
+  expression fallback that corrupts value-preserving AND/walrus expressions.
+  Unrelated nonlocals and global declarations do not qualify.
+- The expression-region simulator retains a walrus assignment only when its
+  stored value is a COPY of the surviving stack value. Ordinary assignments
+  remain statements.
+- Modern loop backedges may target a FOR_ITER's EXTENDED_ARG prefix. The
+  original bytes must prove a contiguous, aligned prefix; a missing decoded
+  instruction alone cannot distinguish a prefix from an inline CACHE gap.
+
+Owned validation passes 35 Rust cases and 43 CPython 3.14 behavior methods,
+including independent evaluation errors, true chains, shadowed slice globals,
+cell short circuit, and large-loop handler continuations. Full-corpus source
+publication still requires an independent set-wise retention gate; these test
+results do not establish recovery of the remaining application units.
