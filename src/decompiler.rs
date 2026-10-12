@@ -31101,6 +31101,40 @@ return None;
                 return;
             }
         }
+        // A single 3.14 rejection guard has exactly one fall-through back
+        // edge before its success target. Preserve it as `if: continue`.
+        // Treating the success region as an If suite bounded by the NEXT
+        // back edge closes that suite at an independent later guard and
+        // ejects the return that relies on its assignments (a coordinator
+        // lookup then returns an unbound local for non-dictionary rows).
+        // Inline comprehension filters retain their own bookkeeping. A
+        // nested while loop is not this for loop's rejection trampoline.
+        if self.version.at_least(3, 14) && self.inline_comp.is_none()
+            && raw_target == target && target > self.cur_next
+        {
+            let loop_top = self.blocks.iter().rev()
+                .find(|block| matches!(block.kind, BlockType::For | BlockType::While))
+                .filter(|block| block.kind == BlockType::For)
+                .map(|block| block.start);
+            let trampoline = self.idx_of.get(&self.cur_next).map(|&index| {
+                self.instrs[index..].iter().take_while(|item| item.offset < target)
+                    .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                    .collect::<Vec<_>>()
+            });
+            if let (Some(top), Some(steps)) = (loop_top, trampoline) {
+                if steps.len() == 1
+                    && matches!(steps[0].op, Op::JUMP_BACKWARD | Op::JUMP_BACKWARD_NO_INTERRUPT)
+                    && steps[0].target == Some(top) && steps[0].end() == target
+                {
+                    self.push_stmt(Stmt::If {
+                        cond: if jump_if_true { negate_cond(cond) } else { cond },
+                        body: vec![Stmt::Continue], orelse: Vec::new(),
+                    });
+                    self.skip_until = Some(target);
+                    return;
+                }
+            }
+        }
         if self.version.at_least(3, 12) {
             if let Some((merged, body_end, tramp_end)) =
                 self.try_or_join(&cond, jump_if_true, target)

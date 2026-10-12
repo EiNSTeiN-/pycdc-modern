@@ -389,6 +389,34 @@ class Python314RoundTrip(unittest.TestCase):
                 {'a': 1, 'b': 2, 'c': 3, 'd': 4}]
         self.assertEqual(recovered(rows), original(rows))
 
+    def test_independent_loop_rejections_keep_assignment_and_return_scope(self):
+        original, recovered = self.recover(
+            'def select(rows):\n'
+            '    for row in rows:\n'
+            '        if not isinstance(row, dict):\n            continue\n'
+            '        coordinator = row.get("coordinator")\n'
+            '        if coordinator is None:\n            continue\n'
+            '        return coordinator\n')
+        for rows in ([], [1], [1, {}], [1, {'coordinator': 7}],
+                     [{}, {'coordinator': None}, {'coordinator': 0}],
+                     [{'coordinator': False}, {'coordinator': 9}]):
+            self.assertEqual(recovered(rows), original(rows))
+        def exercise(function):
+            calls = []
+            class Coordinator:
+                def __bool__(self): raise AssertionError('Must test None identity only')
+            result = Coordinator()
+            class Row(dict):
+                def get(self, key): calls.append(key); return result
+            self.assertIs(function([object(), {}, Row()]), result)
+            return calls
+        self.assertEqual(exercise(recovered), exercise(original))
+        # Line metadata may alter fused stores, but this fixture has identical
+        # instruction/exception bytes and all original local spellings.
+        self.assertEqual(recovered.__code__.co_code, original.__code__.co_code)
+        self.assertEqual(recovered.__code__.co_exceptiontable, original.__code__.co_exceptiontable)
+        self.assertEqual(recovered.__code__.co_varnames, original.__code__.co_varnames)
+
     def test_negated_chain_evaluates_middle_call_once(self):
         original, recovered = self.recover(
             'def select(value):\n'
