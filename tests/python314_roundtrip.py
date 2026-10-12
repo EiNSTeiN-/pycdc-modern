@@ -16,6 +16,47 @@ BINARY = Path(os.environ.get('PYCDC_BINARY', str(ROOT / 'target/debug/pycdc')))
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def check_generator_bytes(self, source):
+        import types
+        code = compile(source, 'owned-original', 'exec')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'owned.pyc'
+            path.write_bytes(importlib.util.MAGIC_NUMBER + bytes(12) + marshal.dumps(code))
+            result = subprocess.run([str(BINARY), str(path)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('incomplete', result.stderr)
+        recovered = compile(result.stdout, 'owned-recovered', 'exec')
+        def generator(module):
+            function = next(value for value in module.co_consts
+                            if isinstance(value, types.CodeType) and value.co_name == 'select')
+            return next(value for value in function.co_consts
+                        if isinstance(value, types.CodeType) and value.co_name == '<genexpr>')
+        left, right = generator(code), generator(recovered)
+        self.assertEqual(left.co_code, right.co_code)
+        self.assertEqual(left.co_exceptiontable, right.co_exceptiontable)
+        self.assertEqual(left.co_varnames, right.co_varnames)
+        namespaces = [{}, {}]; exec(code, namespaces[0]); exec(recovered, namespaces[1])
+        return namespaces[0]['select'], namespaces[1]['select']
+
+    def test_repeated_unpack_target_keeps_elided_stores_and_errors(self):
+        original, recovered = self.check_generator_bytes(
+            'def select(values):\n'
+            '    return tuple(value is not None for value, discarded, discarded, discarded in values)\n')
+        for values in ([], [(None, 1, 2, 3)], [(1, 2, 3, 4), (None, 5, 6, 7)],
+                       [(1, 2)], [None]):
+            outcomes = []
+            for function in (original, recovered):
+                try: outcomes.append(function(values))
+                except (TypeError, ValueError) as error: outcomes.append((type(error).__name__, str(error)))
+            self.assertEqual(outcomes[1], outcomes[0])
+
+    def test_real_underscore_and_surviving_repeat_values_are_kept(self):
+        original, recovered = self.check_generator_bytes(
+            'def select(values):\n'
+            '    return tuple((value, discarded, _) for value, _, discarded, discarded in values)\n')
+        for values in ([], [(1, 2, 3, 4)], [(5, 6, 7, 8), (9, 10, 11, 12)]):
+            self.assertEqual(recovered(values), original(values))
+
     def recover(self, source):
         code = compile(source, 'fixture.py', 'exec')
         return self.recover_code(code)

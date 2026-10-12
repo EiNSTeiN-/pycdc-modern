@@ -42865,6 +42865,36 @@ fn cmp_from_index(idx: usize) -> CmpOp {
 // =====================  stack events, calls, functions, classes  =====================
 
 impl<'a> Ctx<'a> {
+    fn discarded_unpack_target(&self, remaining: usize) -> ExprRef {
+        // Repeated local targets can have their earlier stores replaced by
+        // POP_TOP. Their names may then be obfuscated while the surviving
+        // store keeps its slot. Reuse the next direct local store's spelling:
+        // the compiler elides the duplicate instead of creating an extra `_`
+        // local. Do not cross nested unpacking, side effects or control flow.
+        let name = if self.version.at_least(3, 14) {
+            self.idx_of.get(&self.cur_offset).and_then(|&index| {
+                let mut discarded = 1usize;
+                for next in &self.instrs[index + 1..] {
+                    match next.op {
+                        Op::NOP | Op::CACHE | Op::EXTENDED_ARG | Op::NOT_TAKEN => {},
+                        Op::POP_TOP => {
+                            discarded += 1;
+                            if discarded >= remaining { return None; }
+                        }
+                        Op::STORE_FAST => return self.code.varnames.get(next.arg as usize).cloned(),
+                        Op::STORE_FAST_STORE_FAST | Op::STORE_FAST_LOAD_FAST => {
+                            return self.code.varnames.get(((next.arg >> 4) & 0xF) as usize).cloned();
+                        }
+                        Op::STORE_DEREF => return self.code.deref_name(next.arg as usize).map(str::to_string),
+                        _ => return None,
+                    }
+                }
+                None
+            })
+        } else { None };
+        self.name_expr(name.as_deref().unwrap_or("_"))
+    }
+
     fn handle_pop_top(&mut self) {
         // 3.14 `_` elision: the compiler replaces the store of a
         // throwaway `_` name inside a tuple unpack with a POP_TOP
@@ -42878,8 +42908,9 @@ impl<'a> Ctx<'a> {
             if *remaining > 0 {
                 let is_slot = matches!(self.stack.last(), Some(Sv::E(e)) if Rc::ptr_eq(e, fv));
                 if is_slot {
+                    let target = self.discarded_unpack_target(*remaining);
                     if let Some(Sv::E(_)) = self.stack.pop() {
-                        self.collect_unpack_target(self.name_expr("_"));
+                        self.collect_unpack_target(target);
                     }
                     return;
                 }

@@ -37,6 +37,11 @@ CPython 3.14 constructs encountered during static source recovery:
   annotation entries without introducing a runtime condition. Consecutive
   fields share one block. Actual conditions, loops, default-value calls and
   deferred annotation lookups are covered by owned behavior regressions.
+- Repeated local unpack targets retain the surviving binding's spelling when
+  earlier stores were elided as POP_TOP. The bounded lookup stops at nested
+  unpacking, side effects and control flow; real underscore stores are retained.
+  Owned generator fixtures compare exact instruction/exception bytes, normal
+  values, surviving targets and unpack failures without extra discard locals.
 
 Build with `cargo build --release --locked`. In addition to `cargo test`, run
 `PYCDC_BINARY=target/release/pycdc python3.14 tests/python314_roundtrip.py -v`.
