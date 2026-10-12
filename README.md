@@ -27,6 +27,8 @@ CPython 3.14 constructs encountered during static source recovery:
   Inline comprehensions and nested while loops keep their separate handling.
   Owned fixtures include non-dictionary rows, missing/None/false results,
   side-effecting getters and an object whose truth conversion raises.
+  Comparison operators remain unchanged when the rejection polarity is
+  inverted; NaN and rich-comparison hooks receive dedicated behavior tests.
 - Large dictionary displays inside comprehensions keep their own `MAP_ADD 1`
   operations.
 - Shared rejection guards preserve missing-value and ordinary truth tests,
