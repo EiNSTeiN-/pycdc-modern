@@ -20,11 +20,12 @@ CPython 3.14 constructs encountered during static source recovery:
   continue guard becomes the generator filter without reverting to the legacy
   expression simulator. Owned fixtures compare exact generator instruction and
   exception bytes, false/None/true values, and truth-test/getter call order.
-- Independent for-loop rejection guards retain their continue branches and
-  assignment/return scope. A single forward success jump around exactly one
-  back edge to the current for-loop head remains an inverted rejection guard;
-  its success suite is not incorrectly bounded by a later guard's back edge.
-  Inline comprehensions and nested while loops keep their separate handling.
+- Independent for-loop lookup guards retain their continue branches and
+  assignment/return scope. A forward success jump around one back edge is
+  retained as rejection only when its suite assigns the local checked by a
+  later independent None guard and returned afterward. Its success suite is
+  not incorrectly bounded by that later guard's back edge. Protected suites,
+  inline comprehensions and nested while loops keep their separate handling.
   Owned fixtures include non-dictionary rows, missing/None/false results,
   side-effecting getters and an object whose truth conversion raises.
   Comparison operators remain unchanged when the rejection polarity is

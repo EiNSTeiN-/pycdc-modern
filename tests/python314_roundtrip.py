@@ -436,6 +436,35 @@ class Python314RoundTrip(unittest.TestCase):
         self.assertEqual(exercise(recovered), exercise(original))
         self.assertEqual(recovered.__code__.co_code, original.__code__.co_code)
 
+    def test_lookup_guard_keeps_comparison_and_getter_order(self):
+        original, recovered = self.recover(
+            'def select(values):\n'
+            '    for value in values:\n'
+            '        if not value.rating < 10:\n            continue\n'
+            '        coordinator = value.coordinator\n'
+            '        if coordinator is None:\n            continue\n'
+            '        return coordinator\n')
+        from types import SimpleNamespace
+        for values in ([], [SimpleNamespace(rating=float('nan'), coordinator=7)],
+                       [SimpleNamespace(rating=float('nan'), coordinator=7),
+                        SimpleNamespace(rating=3, coordinator=0)]):
+            self.assertEqual(recovered(values), original(values))
+        def exercise(function):
+            calls = []
+            class Rating:
+                def __init__(self, label, number): self.label, self.number = label, number
+                def __lt__(self, limit): calls.append((self.label, 'lt', limit)); return self.number < limit
+                def __ge__(self, limit): raise AssertionError('Must preserve comparison operator')
+            class Row:
+                def __init__(self, label, number, coordinator):
+                    self.label, self.rating, self.value = label, Rating(label, number), coordinator
+                @property
+                def coordinator(self): calls.append(('getter', self.label)); return self.value
+            result = function([Row('skip', 20, 7), Row('missing', 5, None), Row('take', 6, 0)])
+            return result, calls
+        self.assertEqual(exercise(recovered), exercise(original))
+        self.assertEqual(recovered.__code__.co_code, original.__code__.co_code)
+
     def test_negated_chain_evaluates_middle_call_once(self):
         original, recovered = self.recover(
             'def select(value):\n'
