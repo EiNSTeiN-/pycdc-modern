@@ -29352,6 +29352,51 @@ return None;
                     };
                     st.push(Rc::new(e));
                 }
+                // Shared validation raises often construct an f-string
+                // message. Use the main parser's conversion/spec model,
+                // with exact stack consumption and no invented value ops.
+                Op::CONVERT_VALUE if self.version.at_least(3, 14) => {
+                    let conversion = match ins.arg {
+                        1 => 's', 2 => 'r', 3 => 'a', _ => return None,
+                    };
+                    let value = st.pop()?;
+                    st.push(Rc::new(Expr::FString(Box::new(FString {
+                        parts: vec![FStringPart::Value { value, conversion: Some(conversion), format_spec: None }],
+                    }))));
+                }
+                Op::FORMAT_SIMPLE | Op::FORMAT_WITH_SPEC if self.version.at_least(3, 14) => {
+                    let spec = if ins.op == Op::FORMAT_WITH_SPEC { Some(st.pop()?) } else { None };
+                    let value = st.pop()?;
+                    let (value, conversion) = match &*value {
+                        Expr::FString(text) if text.parts.len() == 1 => match &text.parts[0] {
+                            FStringPart::Value { value: inner, conversion, format_spec: None } =>
+                                (inner.clone(), *conversion),
+                            _ => (value, None),
+                        },
+                        _ => (value, None),
+                    };
+                    st.push(Rc::new(Expr::FString(Box::new(FString {
+                        parts: vec![FStringPart::Value {
+                            value, conversion, format_spec: spec.map(|value| Box::new(expr_to_fstring(value))),
+                        }],
+                    }))));
+                }
+                Op::BUILD_STRING if self.version.at_least(3, 14) => {
+                    if st.len() < arg { return None; }
+                    let values = st.split_off(st.len() - arg);
+                    let mut parts = Vec::new();
+                    for value in values {
+                        match &*value {
+                            Expr::Const(value) => match &**value {
+                                PyObject::Str(text) => parts.push(FStringPart::Literal(text.clone())),
+                                _ => return None,
+                            },
+                            Expr::FString(text) => parts.extend(text.parts.iter().cloned()),
+                            _ => return None,
+                        }
+                    }
+                    st.push(Rc::new(Expr::FString(Box::new(FString { parts }))));
+                }
                 Op::RETURN_CONST => {
                     st.push(Rc::new(Expr::Const(
                         self.code.consts.get(arg).cloned().unwrap_or_else(|| Rc::new(PyObject::None)),
@@ -30057,27 +30102,32 @@ return None;
             if !self.blocks.iter().any(|block| matches!(block.kind, BlockType::For | BlockType::While)
                 && (block.start == top || block.cond_end == top)) { return None; }
             (vec![Stmt::Continue], reject_index + 1)
-        } else if reject.op == Op::LOAD_CONST {
-            let ret = skip_padding(reject_index + 1);
-            if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
-            let value = self.code.consts.get(reject.arg as usize)?.clone();
-            (vec![Stmt::Return(Some(Rc::new(Expr::Const(value))))], ret + 1)
         } else {
-            // A rejection can return a constructed outcome rather than a
-            // literal. Accept only a straight value expression that leaves
-            // exactly one result before RETURN; no intervening branch/store.
+            // A rejection can return a value or raise an exception, with an
+            // optional explicit cause. Keep the straight expression region
+            // and require exactly the terminator's operands. Bare reraises,
+            // cleanup, stores and intervening branches remain unsupported.
             let mut ret = reject_index;
             while let Some(item) = self.instrs.get(ret) {
-                if item.op == Op::RETURN_VALUE { break; }
+                if item.op == Op::RETURN_VALUE
+                    || (item.op == Op::RAISE_VARARGS && matches!(item.arg, 1 | 2)) { break; }
                 if item.is_jump() || matches!(item.op, Op::STORE_FAST | Op::STORE_NAME
                     | Op::STORE_DEREF | Op::STORE_ATTR | Op::STORE_SUBSCR | Op::POP_EXCEPT
                     | Op::PUSH_EXC_INFO | Op::RERAISE | Op::RAISE_VARARGS) { return None; }
                 ret += 1;
             }
-            if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
+            let terminal = self.instrs.get(ret)?;
             let mut result = self.sim_stack_region(reject_index, ret, Vec::new())?;
-            if result.len() != 1 { return None; }
-            (vec![Stmt::Return(Some(result.pop()?))], ret + 1)
+            let statement = match terminal.op {
+                Op::RETURN_VALUE if result.len() == 1 => Stmt::Return(Some(result.pop()?)),
+                Op::RAISE_VARARGS if matches!(terminal.arg, 1 | 2)
+                    && result.len() == terminal.arg as usize => {
+                    let cause = if terminal.arg == 2 { Some(result.pop()?) } else { None };
+                    Stmt::Raise { exc: Some(result.pop()?), cause, py2_inst: None, py2_tb: None }
+                }
+                _ => return None,
+            };
+            (vec![statement], ret + 1)
         };
         let equivalent_return = |index: usize| -> Option<usize> {
             let Some(Stmt::Return(Some(expected))) = body.first() else { return None; };
@@ -30170,10 +30220,34 @@ return None;
                     _ => None,
                 }
             } else { None };
+            let chain_merged = merged.is_some();
             if let Some(merged) = merged { values.pop(); values.push(merged); }
             else { values.push(member); }
             if complete { break; }
             start = end + 1;
+            // A successful chained comparison can jump over its failed
+            // link's POP_TOP/JUMP_FORWARD cleanup into another predicate.
+            // Skip only that complete trampoline back to this rejection;
+            // simulating it on the success path consumes the middle value
+            // again or makes the remaining predicate region unparseable.
+            if chain_merged && carried.is_empty() {
+                let success = skip_padding(start);
+                if let Some(skip) = self.instrs.get(success) {
+                    if skip.op == Op::JUMP_FORWARD {
+                        if let Some(&destination) = skip.target.and_then(|offset| self.idx_of.get(&offset)) {
+                            let cleanup = skip_padding(success + 1);
+                            let jump = skip_padding(cleanup + 1);
+                            if destination < reject_index
+                                && self.instrs.get(cleanup).map_or(false, |item| item.op == Op::POP_TOP)
+                                && self.instrs.get(jump).map_or(false, |item| item.op == Op::JUMP_FORWARD
+                                    && item.target.map_or(false, reaches_reject))
+                                && skip_padding(jump + 1) == destination {
+                                start = destination;
+                            }
+                        }
+                    }
+                }
+            }
         }
         if !complete || !carried.is_empty() || values.len() < 2 { return None; }
         Some((Rc::new(Expr::BoolOp { op: BoolOpKind::Or, values }), body, body_start))

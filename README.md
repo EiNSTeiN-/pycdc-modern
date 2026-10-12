@@ -44,6 +44,14 @@ CPython 3.14 constructs encountered during static source recovery:
   negated chained comparisons, and shared continue/return blocks. Rejections
   can construct results with positional/keyword arguments. Guard generators
   reuse the main parser and retain lexical captures and lazy consumption.
+  Shared raises retain their exception expression and optional explicit
+  cause, with the exact required stack operands. A recognized comparison
+  cleanup trampoline stays off the success path into a later predicate.
+  Formatted messages retain conversions and dynamic specifications through
+  the existing f-string model; bare reraises, cleanup and general branches
+  remain outside this reconstruction. Owned fixtures compare instruction
+  and exception bytes, rich-comparison/format hooks, NaN, constructor errors,
+  cause evaluation and exception metadata.
   Chained middle expressions
   are evaluated once, and NaN comparisons retain their original polarity.
   Extending an accumulated comparison chain retains every earlier operand;

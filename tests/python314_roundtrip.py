@@ -192,6 +192,172 @@ class Python314RoundTrip(unittest.TestCase):
                 with self.subTest(source=source, rows=rows):
                     self.assertEqual(exercise(recovered, rows), exercise(original, rows))
 
+    def test_shared_raise_guard_keeps_predicates_constructor_and_errors(self):
+        source = ('def select(value, bad, ready, make_error):\n'
+                  '    if value is None or bad(value) or not ready(value):\n'
+                  '        raise make_error("invalid", value=value)\n'
+                  '    return value\n')
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        def exercise(function, value, bad_value, ready_value, fail):
+            calls = []
+            def bad(item):
+                calls.append(('bad', item))
+                if fail == 'bad': raise KeyError('bad failed')
+                return bad_value
+            def ready(item):
+                calls.append(('ready', item))
+                if fail == 'ready': raise KeyError('ready failed')
+                return ready_value
+            def make_error(message, **keywords):
+                calls.append(('error', message, keywords))
+                if fail == 'constructor': raise TypeError('constructor failed')
+                return ValueError(message)
+            try: result = ('value', function(value, bad, ready, make_error))
+            except (KeyError, TypeError, ValueError) as error:
+                result = (type(error).__name__, str(error))
+            return result, calls
+        from itertools import product
+        for value, bad, ready, fail in product((None, 0, 7), (False, True), (False, True),
+                                               ('', 'bad', 'ready', 'constructor')):
+            self.assertEqual(exercise(recovered, value, bad, ready, fail),
+                             exercise(original, value, bad, ready, fail))
+
+    def test_shared_raise_comparison_chain_keeps_middle_call_nan_and_rich_hooks(self):
+        source = ('def select(value, read, invalid, make_error):\n'
+                  '    if value is None or not 0 <= read(value) <= 10 or invalid(value):\n'
+                  '        raise make_error("range failed")\n'
+                  '    return value\n')
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        def exercise(function, value, number, invalid_value, failure):
+            calls = []
+            class Number:
+                def __ge__(self, other):
+                    calls.append(('ge', other))
+                    if failure == 'ge': raise TypeError('ge failed')
+                    return number >= other
+                def __le__(self, other):
+                    calls.append(('le', other))
+                    if failure == 'le': raise TypeError('le failed')
+                    return number <= other
+                def __lt__(self, other):
+                    raise AssertionError('Do not replace a negated chain with inverse comparisons')
+                def __gt__(self, other):
+                    raise AssertionError('Do not replace a negated chain with inverse comparisons')
+            def read(item):
+                calls.append(('read', item))
+                if failure == 'read': raise TypeError('read failed')
+                return Number()
+            def invalid(item):
+                calls.append(('invalid', item))
+                return invalid_value
+            def make_error(message):
+                calls.append(('error', message))
+                return ValueError(message)
+            try: result = ('value', function(value, read, invalid, make_error))
+            except (TypeError, ValueError) as error:
+                result = (type(error).__name__, str(error))
+            return result, calls
+        from itertools import product
+        for value, number, invalid, failure in product((None, 'value'), (-1, 0, 5, 10, 11, float('nan')),
+                                                       (False, True), ('', 'read', 'ge', 'le')):
+            self.assertEqual(exercise(recovered, value, number, invalid, failure),
+                             exercise(original, value, number, invalid, failure))
+
+    def test_shared_raise_explicit_cause_preserves_evaluation_and_exception_metadata(self):
+        source = ('def select(value, reject, make_error, make_cause):\n'
+                  '    if value is None or reject(value):\n'
+                  '        raise make_error("invalid", value=value) from make_cause(value)\n'
+                  '    return value\n')
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        def exercise(function, value, rejects, cause_mode):
+            calls = []
+            def reject(item):
+                calls.append(('reject', item)); return rejects
+            def make_error(message, **keywords):
+                calls.append(('error', message, keywords)); return ValueError(message)
+            def make_cause(item):
+                calls.append(('cause', item))
+                if cause_mode == 'failure': raise KeyError('cause factory failed')
+                if cause_mode == 'invalid': return 'invalid cause'
+                return RuntimeError('original cause') if cause_mode == 'exception' else None
+            try: result = ('value', function(value, reject, make_error, make_cause))
+            except (KeyError, TypeError, ValueError) as error:
+                cause = error.__cause__
+                result = (type(error).__name__, str(error),
+                          None if cause is None else (type(cause).__name__, str(cause)),
+                          error.__suppress_context__)
+            return result, calls
+        from itertools import product
+        for value, rejects, cause_mode in product((None, 0, 7), (False, True),
+                                                   ('none', 'exception', 'invalid', 'failure')):
+            self.assertEqual(exercise(recovered, value, rejects, cause_mode),
+                             exercise(original, value, rejects, cause_mode))
+
+    def test_shared_raise_formatted_messages_keep_conversion_spec_and_cause_order(self):
+        messages = ('f"{label!r}: {value!s:>{width}}"',
+                    'f"{label!a}: {value:{width}}"')
+        def exercise(function, number, rejects, failure):
+            calls = []
+            class Label:
+                def __repr__(self):
+                    calls.append('repr')
+                    if failure == 'repr': raise TypeError('repr failed')
+                    return 'label-α'
+            class Value:
+                def __str__(self):
+                    calls.append('str')
+                    if failure == 'str': raise TypeError('str failed')
+                    return 'value'
+                def __format__(self, spec):
+                    calls.append(('format', spec))
+                    if failure == 'format': raise TypeError('format failed')
+                    return 'formatted-' + spec
+            class Width:
+                def __format__(self, spec):
+                    calls.append(('width', spec))
+                    if failure == 'width': raise TypeError('width failed')
+                    return '6'
+            def read(value):
+                calls.append('read'); return number
+            def reject(value):
+                calls.append('reject'); return rejects
+            def make_error(message):
+                calls.append(('error', message)); return ValueError(message)
+            def make_cause():
+                calls.append('cause')
+                if failure == 'cause': raise KeyError('cause failed')
+                return RuntimeError('cause')
+            value = None if number is None else Value()
+            try:
+                result = function(value, Label(), Width(), read, reject, make_error, make_cause)
+                result = ('value', 'value object' if result is value and value is not None else result)
+            except (KeyError, TypeError, ValueError) as error:
+                cause = error.__cause__
+                result = (type(error).__name__, str(error),
+                          None if cause is None else (type(cause).__name__, str(cause)),
+                          error.__suppress_context__)
+            return result, calls
+        from itertools import product
+        for message, cause in product(messages, ('', ' from make_cause()')):
+            source = ('def select(value, label, width, read, reject, make_error, make_cause):\n'
+                      '    if value is None or not 0 <= read(value) <= 10 or reject(value):\n'
+                      f'        raise make_error({message}){cause}\n'
+                      '    return value\n')
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for number, rejects, failure in product((None, 5, 11), (False, True),
+                                                     ('', 'repr', 'str', 'format', 'width', 'cause')):
+                with self.subTest(message=message, cause=cause, number=number, rejects=rejects, failure=failure):
+                    self.assertEqual(exercise(recovered, number, rejects, failure),
+                                     exercise(original, number, rejects, failure))
+
     def test_padded_exception_returns_keep_the_mainline_value_build(self):
         import dis
         import types
