@@ -62,6 +62,186 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_padded_none_handler_tail_does_not_consume_following_timestamp_branch(self):
+        import types
+        from datetime import datetime, timezone
+        source = '''from datetime import datetime, timezone
+def select(value):
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+'''
+        module = compile(source, 'owned_timestamp.py', 'exec', dont_inherit=True)
+        function_code = next(value for value in module.co_consts if isinstance(value, types.CodeType))
+        for padding in (0, 1, 3):
+            padded = pad_return_values(self, function_code, padding)
+            exported = module.replace(co_consts=tuple(padded if value is function_code else value for value in module.co_consts))
+            original, recovered = self.recover_code(exported)
+            values = [None, True, False, 0, 123456789, float('inf'), float('nan'), 'invalid',
+                      '2026-10-12T12:00:00', '2026-10-12T12:00:00Z',
+                      datetime(2026, 10, 12), datetime(2026, 10, 12, tzinfo=timezone.utc)]
+            for value in values:
+                with self.subTest(padding=padding, value=value):
+                    self.assertEqual(recovered(value), original(value))
+            # Parsing errors are caught; timezone-conversion errors are not.
+            class Parsed:
+                tzinfo = object()
+                def astimezone(self, zone): raise ValueError('owned timezone conversion')
+            class OwnedDatetime(datetime):
+                @classmethod
+                def fromisoformat(cls, text): return Parsed()
+            for function in (original, recovered):
+                function.__globals__['datetime'] = OwnedDatetime
+                with self.assertRaisesRegex(ValueError, 'owned timezone conversion'):
+                    function('owned timestamp')
+        protected = '''        try:
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return
+'''
+        scopes = (
+            '''        try:
+            pass
+        except (OverflowError, OSError, ValueError):
+            return
+        return datetime.fromtimestamp(value, timezone.utc)
+''',
+            '''        try:
+            pass
+        except (OverflowError, OSError, ValueError):
+            return
+        else:
+            return datetime.fromtimestamp(value, timezone.utc)
+''',
+            '''        try:
+            stamp = datetime.fromtimestamp(value, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return
+        return stamp
+''',
+        )
+        for scope_index, scope in enumerate(scopes):
+            control = compile(source.replace(protected, scope), 'owned_scope_control.py', 'exec', dont_inherit=True)
+            function_code = next(value for value in control.co_consts if isinstance(value, types.CodeType))
+            for padding in (0, 1, 3):
+                padded = pad_return_values(self, function_code, padding)
+                exported = control.replace(co_consts=tuple(padded if value is function_code else value for value in control.co_consts))
+                original, recovered = self.recover_code(exported)
+                for value in (0, float('inf'), float('nan'), '2026-10-12T12:00:00Z'):
+                    outcomes = []
+                    for function in (original, recovered):
+                        try: outcome = ('value', function(value))
+                        except (ValueError, OverflowError) as error: outcome = (type(error).__name__, str(error))
+                        outcomes.append(outcome)
+                    with self.subTest(scope=scope_index, padding=padding, value=value):
+                        self.assertEqual(outcomes[1], outcomes[0])
+                        if scope_index < 2 and isinstance(value, float):
+                            self.assertIn(outcomes[1][0], ('ValueError', 'OverflowError'))
+
+    def test_long_copy_chains_keep_one_evaluation_and_fused_stores(self):
+        for size in (3, 4, 5, 6):
+            names = [f'value{index}' for index in range(size)]
+            for expression in ('read()', 'None'):
+                source = ('def select(read):\n    ' + ' = '.join(names) +
+                          ' = ' + expression + '\n    return ' + ', '.join(names) + '\n')
+                original, recovered = self.recover(source)
+                self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                for failure in (False, True):
+                    outcomes = []
+                    for function in (original, recovered):
+                        events = []
+                        value = object()
+                        def read():
+                            events.append('read')
+                            if failure: raise ValueError('owned chain')
+                            return value
+                        try:
+                            result = function(read)
+                            outcome = ('value', all(item is result[0] for item in result),
+                                       result[0] is value if expression == 'read()' else result[0] is None)
+                        except ValueError as error: outcome = (type(error).__name__, str(error))
+                        outcomes.append((outcome, events))
+                    with self.subTest(size=size, expression=expression, failure=failure):
+                        self.assertEqual(outcomes[1], outcomes[0])
+                        self.assertEqual(len(outcomes[1][1]), int(expression == 'read()'))
+
+    def test_for_over_awaited_collection_stays_synchronous(self):
+        source = ('async def select(read):\n    result = []\n'
+                  '    for item in await read():\n        result.append(item)\n'
+                  '    return result\n')
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        for mode in ('empty', 'values', 'read_error', 'iteration_error', 'cancelled'):
+            outcomes = []
+            for function in (original, recovered):
+                events = []
+                class Rows:
+                    def __iter__(self):
+                        events.append('iter')
+                        if mode == 'iteration_error': raise ValueError('owned iteration')
+                        return iter([] if mode == 'empty' else [1, 2])
+                async def read():
+                    events.append('read')
+                    if mode == 'read_error': raise ValueError('owned read')
+                    if mode == 'cancelled': raise asyncio.CancelledError('owned cancel')
+                    return Rows()
+                try: outcome = ('value', asyncio.run(function(read)))
+                except (ValueError, asyncio.CancelledError) as error: outcome = (type(error).__name__, str(error))
+                outcomes.append((outcome, events))
+            self.assertEqual(outcomes[1], outcomes[0])
+        # Genuine async iteration must keep its independent decoder path.
+        source = ('async def select(read):\n    result = []\n'
+                  '    async for item in read():\n        result.append(item)\n'
+                  '    return result\n')
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        async def read_async():
+            yield 3
+            yield 4
+        self.assertEqual(asyncio.run(original(read_async)), [3, 4])
+        self.assertEqual(asyncio.run(recovered(read_async)), [3, 4])
+
+    def test_nested_conditional_dict_return_comprehension_keeps_all_work(self):
+        source = ("def select(rows):\n    return [{'date':str(row['date']), "
+                  "'excluded': {'count':row['count'], 'reasons':loads(row['reasons']) "
+                  "if row['reasons'] else {}} if row['count'] is not None else {}, "
+                  "'archived':str(row['archived']) if row['archived'] else None} for row in rows]\n")
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        for count in (None, 0, 2):
+            for reasons in ('', 'encoded'):
+                for archived in (None, 'saved'):
+                    for failure in (False, True):
+                        outcomes = []
+                        for function in (original, recovered):
+                            events = []
+                            def loads(value):
+                                events.append(value)
+                                if failure: raise ValueError('owned decode')
+                                return {'decoded': value}
+                            function.__globals__['loads'] = loads
+                            rows = [dict(date='2026-10-12', count=count, reasons=reasons, archived=archived)]
+                            try: outcome = ('value', function(rows))
+                            except ValueError as error: outcome = (type(error).__name__, str(error))
+                            outcomes.append((outcome, events))
+                        self.assertEqual(outcomes[1], outcomes[0])
+                        self.assertEqual(len(outcomes[1][1]), int(count is not None and bool(reasons)))
+        self.assertEqual(original([]), recovered([]))
+
     def test_walrus_rejection_guard_keeps_one_assignment_and_short_circuit(self):
         source = ('def select(entity_id, get):\n'
                   '    if not entity_id or (state := get(entity_id)) is None:\n'

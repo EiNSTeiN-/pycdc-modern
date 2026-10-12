@@ -5163,6 +5163,50 @@ impl<'a> Ctx<'a> {
             }
         }
         let mut body = self.pending_try_body.pop().unwrap_or_default();
+        // A narrowed except-only range can end on padding immediately before
+        // RETURN_VALUE, while its calculated value is still live. Preserve
+        // that exact carried return inside the try without scanning onward
+        // into a following sibling branch or an out-of-line handler.
+        if self.version.at_least(3, 14)
+            && self.code.name != "<module>"
+            && tc.except_handler.is_some()
+            && tc.finally_handler.is_none()
+            && tc.region_end == tc.body_end
+            && body.is_empty()
+            && orelse.is_empty()
+            && self.stack.len() == 1
+            && matches!(self.stack.last(), Some(Sv::E(_)))
+        {
+            let tail = self.instrs.iter()
+                .skip_while(|instruction| instruction.offset < tc.body_end)
+                .find(|instruction| !matches!(instruction.op,
+                    Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                .copied();
+            if let Some(ret) = tail {
+                let before_handler = tc.except_handler.map_or(false, |handler| ret.offset < handler);
+                let entered_from_outside = self.instrs.iter().any(|instruction| {
+                    (instruction.offset < tc.start || instruction.offset > ret.offset)
+                        && instruction.target.map_or(false, |target| {
+                            target >= tc.body_end && target <= ret.offset
+                        })
+                });
+                let has_context_protocol = self.instrs.iter().any(|instruction| {
+                    instruction.offset >= tc.start && instruction.offset <= tc.body_end
+                        && matches!(instruction.op, Op::BEFORE_WITH | Op::BEFORE_ASYNC_WITH
+                            | Op::WITH_EXCEPT_START | Op::LOAD_SPECIAL)
+                });
+                if ret.op == Op::RETURN_VALUE && before_handler
+                    && !entered_from_outside && !has_context_protocol
+                    && !self.return_offsets.contains(&ret.offset)
+                {
+                    body.push(Stmt::Return(Some(self.pop_expr())));
+                    self.return_offsets.insert(ret.offset);
+                    if self.skip_until.map_or(true, |skip| skip < ret.end()) {
+                        self.skip_until = Some(ret.end());
+                    }
+                }
+            }
+        }
         // 3.12+ with-wrapped try: the body's tail `return None` sits in
         // the gap between body_end and the chain head, AFTER the inline
         // with success-exit sequence (POP_EXCEPT; LOAD None ×3; CALL;
@@ -19422,20 +19466,10 @@ let reopen = self
                     return true;
                 }
                 let target = inst.target.unwrap_or(inst.end());
-                // async for: the iterable expression is an Await, or we are
-                // inside an async def using GET_AITER
-                let is_async = matches!(
-                    self.stack.last(),
-                    Some(Sv::E(e)) if matches!(&**e, Expr::Await(_))
-                );
-                if is_async {
-                    if let Some(Sv::E(e)) = self.stack.last_mut() {
-                        if let Expr::Await(inner) = &**e {
-                            *e = inner.clone();
-                        }
-                    }
-                }
-                self.handle_for_iter(target, is_async);
+                // FOR_ITER iterates synchronously, even when the collection
+                // was produced by `await fetch()`. Genuine async iteration
+                // uses GET_AITER/GET_ANEXT and its separate decoder path.
+                self.handle_for_iter(target, false);
                 true
             }
             Op::FOR_LOOP => {
@@ -42795,6 +42829,7 @@ impl<'a> Ctx<'a> {
                     | Some(Op::STORE_DEREF)
                     | Some(Op::STORE_GLOBAL)
                     | Some(Op::STORE_FAST_MAYBE_NULL)
+                    | Some(Op::STORE_FAST_STORE_FAST)
             )
         };
         if is_store(self.instrs.get(ci + 1).map(|x| x.op)) {
@@ -44540,13 +44575,17 @@ impl<'a> Ctx<'a> {
         // the mainline and claimed the else arm's own return as the
         // mirror, losing it. A bare `LOAD None; RETURN` tail is
         // try_tail_sunk_pair's stricter domain - skip it here.
-        if tail.len() < 2 {
+        let meaningful_tail: Vec<_> = tail.iter().filter(|(op, _)| {
+            !matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+        }).collect();
+        if meaningful_tail.len() < 2 {
             return None;
         }
-        if tail.len() == 2
-            && tail[0].0 == Op::LOAD_CONST
+        if meaningful_tail.len() == 2
+            && meaningful_tail[0].0 == Op::LOAD_CONST
+            && meaningful_tail[1].0 == Op::RETURN_VALUE
             && matches!(
-                self.code.consts.get(tail[0].1 as usize).map(|o| &**o),
+                self.code.consts.get(meaningful_tail[0].1 as usize).map(|o| &**o),
                 Some(PyObject::None)
             )
         {
@@ -51852,10 +51891,16 @@ fn genexpr_ternary_merge(
                 | Op::POP_JUMP_IF_TRUE
                 | Op::POP_JUMP_FORWARD_IF_FALSE
                 | Op::POP_JUMP_FORWARD_IF_TRUE
+                | Op::POP_JUMP_IF_NONE
+                | Op::POP_JUMP_IF_NOT_NONE
+                | Op::POP_JUMP_FORWARD_IF_NONE
+                | Op::POP_JUMP_FORWARD_IF_NOT_NONE
         )
     };
     let mut jf_target = None;
-    for x in instrs.iter().skip(ii + 1) {
+    let mut j = ii + 1;
+    while j < instrs.len() {
+        let x = instrs[j];
         if x.offset >= t {
             break;
         }
@@ -51872,6 +51917,18 @@ fn genexpr_ternary_merge(
             break;
         }
         if is_cj(x.op) && x.target == Some(t) && !x.is_backward {
+            j += 1;
+            continue;
+        }
+        // A then-arm value may itself contain a conditional dictionary or
+        // another ternary. Consume its complete, pure value region before
+        // searching for this arm's final jump, just as the else-arm does.
+        if is_cj(x.op) {
+            let nested_merge = Self::genexpr_ternary_merge(instrs, j)?;
+            if nested_merge > t {
+                return None;
+            }
+            j = instrs.iter().position(|item| item.offset == nested_merge)?;
             continue;
         }
         // 3.12+: TO_BOOL sits between the value run and the cond jump
@@ -51879,11 +51936,13 @@ fn genexpr_ternary_merge(
         // element rendered as a plain `x`, silently dropping the else
         // arm on EVERY version with the folded ternary shape)
         if matches!(x.op, Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE) {
+            j += 1;
             continue;
         }
         if !Self::comp_arm_value_op(x.op) {
             return None;
         }
+        j += 1;
     }
     let m = jf_target?;
     let ti = instrs.iter().position(|x| x.offset == t)?;
@@ -51899,13 +51958,7 @@ fn genexpr_ternary_merge(
             j += 1;
             continue;
         }
-        if matches!(
-            x.op,
-            Op::POP_JUMP_IF_FALSE
-                | Op::POP_JUMP_IF_TRUE
-                | Op::POP_JUMP_FORWARD_IF_FALSE
-                | Op::POP_JUMP_FORWARD_IF_TRUE
-        ) {
+        if is_cj(x.op) {
             let nm = Self::genexpr_ternary_merge(instrs, j)?;
             let nmi = instrs.iter().position(|x2| x2.offset == nm)?;
             if nmi > mi {

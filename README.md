@@ -299,3 +299,14 @@ including independent evaluation errors, true chains, shadowed slice globals,
 cell short circuit, and large-loop handler continuations. Full-corpus source
 publication still requires an independent set-wise retention gate; these test
 results do not establish recovery of the remaining application units.
+
+
+The 0.6.17 recovery work fixes ordinary FOR_ITER loops over awaited collections,
+fused stores at the end of longer COPY assignment chains, nested conditional
+values in comprehension then-arms, and padded None handler tails. The narrowed
+carried-return reconstruction keeps the original call protected without consuming
+following branches; owned controls retain unprotected/else calls and timezone
+conversion errors. The owned Python 3.14 suite has 47 methods, including exact
+code/exception comparisons on ordinary fixtures, paired errors/cancellation,
+mutable identity, and padded timestamp scope controls. Full protected-corpus
+retention remains a separate required publication gate.
