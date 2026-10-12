@@ -62,6 +62,92 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_sunk_async_context_exits_keep_early_returns_and_cleanup(self):
+        branches = (
+            'if pending:\n            return False',
+            'if pending:\n            return',
+            'if pending:\n            return False\n        if release:\n            return False',
+            'if pending:\n            return release',
+            'await user_call(None, None, None)',
+            'record("ready")',
+        )
+        for branch in branches:
+            original, recovered = self.recover(
+                'async def select(lock, pending, release, user_call):\n'
+                '    async with lock:\n        record("body")\n        ' + branch + '\n'
+                '    record("outside")\n    return True\n'
+            )
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for pending, release in ((False, False), (True, False), (False, True), (True, True)):
+                for mode in ('normal', 'body_error', 'suppressed', 'cancelled', 'exit_error'):
+                    outcomes = []
+                    for function in (original, recovered):
+                        events = []
+                        class Lock:
+                            async def __aenter__(self):
+                                events.append('enter')
+                                return self
+                            async def __aexit__(self, kind, value, traceback):
+                                events.append(('exit', kind.__name__ if kind else None))
+                                if mode == 'exit_error':
+                                    raise RuntimeError('owned exit')
+                                return mode == 'suppressed'
+                        def record(value):
+                            events.append(value)
+                            if value == 'body' and mode in ('body_error', 'suppressed'):
+                                raise ValueError('owned body')
+                            if value == 'body' and mode == 'cancelled':
+                                raise asyncio.CancelledError('owned cancellation')
+                        async def user_call(*args):
+                            events.append(('user_call', args))
+                        function.__globals__['record'] = record
+                        try:
+                            result = ('return', asyncio.run(function(Lock(), pending, release, user_call)))
+                        except (ValueError, RuntimeError, asyncio.CancelledError) as error:
+                            result = (type(error).__name__, str(error))
+                        outcomes.append((result, events))
+                    with self.subTest(branch=branch, pending=pending, release=release, mode=mode):
+                        self.assertEqual(outcomes[1], outcomes[0])
+
+    def test_chained_comparisons_in_inline_ternaries_keep_element_work(self):
+        expressions = (
+            '{value: 1 if 6 <= value <= 8 else 0 for value in values}',
+            '{(value if 6 <= value <= 8 else -value): value for value in values}',
+            '[0.6 + 0.4 * (1.0 if 4 <= value <= 8 < 10 else 0.3) for value in values]',
+            '[1 if value >= 6 else 0 for value in values if value <= 8]',
+        )
+        for expression in expressions:
+            original, recovered = self.recover(
+                'def select(values):\n    return ' + expression + '\n'
+            )
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for values in ([], list(range(24)), [0, 6, 8, 9, float('inf')]):
+                with self.subTest(expression=expression, values=values):
+                    self.assertEqual(recovered(values), original(values))
+        original, recovered = self.recover('''def select(values, base, coefficient, lower, probe, upper):
+    return {value: base(value) + coefficient(value) * (1.0 if lower() <= probe(value) <= upper() else 0.3) for value in values}
+''')
+        for failure in (None, 'base', 'probe', 'upper'):
+            outcomes = []
+            for function in (original, recovered):
+                events = []
+                def record(label, value=None):
+                    events.append((label, value))
+                    if label == failure:
+                        raise ValueError('owned ' + label)
+                    return {'base': 0.6, 'coefficient': 0.4, 'lower': 4,
+                            'upper': 8, 'probe': value}[label]
+                callbacks = [lambda value=None, label=label: record(label, value)
+                             for label in ('base', 'coefficient', 'lower', 'probe', 'upper')]
+                try:
+                    result = function(range(10), *callbacks)
+                except ValueError as error:
+                    result = str(error)
+                outcomes.append((result, events))
+            self.assertEqual(outcomes[1], outcomes[0])
+
     def test_multiple_keyword_expansions_preserve_merge_checks_and_order(self):
         expressions = (
             'fn(1, fixed=2, **first, **second)',

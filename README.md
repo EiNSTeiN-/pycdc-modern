@@ -321,3 +321,17 @@ direct expansions, named arguments between expansions, intentional dictionary
 updates, invalid mappings/keys, and factory evaluation order. The 35 Rust tests
 also pass. Protected-corpus coverage and the stable branch remain at the
 preceding checkpoint until a complete unchanged-input retention audit passes.
+
+The 0.6.19 development work reconstructs positive comparison chains guarding
+inline-comprehension ternary values. Both arms must be pure value regions with
+the original forward merge and false-arm cleanup; only the COPY-retained middle
+operand is removed, preserving prefix arithmetic and single evaluation of
+side-effecting comparisons. Genuine comprehension filters retain their path.
+Sunk constant-return async context exits preserve the later normal exit slot
+even when the first protocol call is beyond the final protected fragment.
+The arm must contain the bounded return protocol. Expected underflow for the
+unmodeled exit callable keeps the clean state from before that call, including
+any earlier incomplete diagnostic. The Python 3.14 suite has 50 methods with
+120 paired async return/error/suppression/cancellation cases and chained
+dict-key/value/list arithmetic and side-effect controls. Full corpus retention
+remains required before advancing the stable branch or claiming new coverage.

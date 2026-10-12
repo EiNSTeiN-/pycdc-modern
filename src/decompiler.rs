@@ -31761,6 +31761,51 @@ return None;
             if let Some((merged, body_start, body_end)) =
                 self.try_stmt_chain_compare(&cond, target)
             {
+                // A chain can guard a comprehension element's ternary.
+                // Its success/else arms build values; opening a statement
+                // If here drops those values and the collection itself.
+                let ternary_merge = (|| {
+                    let comp = self.inline_comp.as_ref()?;
+                    let start = *self.idx_of.get(&body_start)?;
+                    let end = *self.idx_of.get(&body_end)?;
+                    let then = self.instrs[start..end].iter()
+                        .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                        .collect::<Vec<_>>();
+                    let hop = then.last()?;
+                    let merge = hop.target?;
+                    if hop.op != Op::JUMP_FORWARD || hop.is_backward
+                        || merge <= body_end || merge >= comp.end
+                        || !then[..then.len() - 1].iter().all(|item| is_pure_value_op(item.op))
+                    { return None; }
+                    let merge_index = *self.idx_of.get(&merge)?;
+                    if !self.instrs[end..merge_index].iter().all(|item| {
+                        is_pure_value_op(item.op) || matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    }) { return None; }
+                    let cleanup = *self.idx_of.get(&target)?;
+                    let mut failed = self.instrs[cleanup..start].iter()
+                        .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE));
+                    if failed.next()?.op != Op::POP_TOP { return None; }
+                    let failed_hop = failed.next()?;
+                    if failed_hop.op != Op::JUMP_FORWARD || failed_hop.target != Some(body_end)
+                        || failed.next().is_some()
+                    { return None; }
+                    let Expr::Compare { operands, .. } = &*cond else { return None; };
+                    if !matches!(self.stack.last(), Some(Sv::E(value))
+                        if Rc::ptr_eq(value, &operands[1]))
+                    { return None; }
+                    Some(merge)
+                })();
+                if let Some(merge) = ternary_merge {
+                    // COPY retained this one middle operand for later links.
+                    // The chain scan consumed those links without executing
+                    // their stack operations; remove only that same value.
+                    self.stack.pop();
+                    let comp = self.inline_comp.as_mut().unwrap();
+                    comp.pending_merges.push((merge, merged, None));
+                    comp.tern_chain_t = None;
+                    self.skip_until = Some(body_start);
+                    return;
+                }
                 let mut blk = Block::new(BlockType::If, body_start, body_end);
                 blk.cond = Some(merged);
                 blk.cond_set = true;
@@ -47352,6 +47397,7 @@ impl<'a> Ctx<'a> {
     /// method is already `Attribute { value: receiver }`, so the marker is
     /// only validated, not consumed into the AST.
     fn call_311(&mut self, argc: usize, _is_method: bool) {
+        let clean_before_call = self.clean;
         // 3.11+ assert-with-message: the assertion class and the message
         // sit as [cls, msg] with NO null slot, and CALL 0 consumes msg as
         // the self_or_null position (an implicit first argument). Without
@@ -47393,6 +47439,7 @@ impl<'a> Ctx<'a> {
         //   the iterable sits ABOVE the function and becomes the marker
         // Peek before popping to choose the right order.
         let n = self.stack.len();
+        let missing_callable_slot = n == 0;
         let genexpr_case = n >= 2
             && matches!(&self.stack[n - 1], Sv::E(_))
             && matches!(&self.stack[n - 2], Sv::E(f) if is_comp_callable(f));
@@ -47593,10 +47640,31 @@ impl<'a> Ctx<'a> {
             && none_args
             && (func_is_none || func_is_underflow)
         {
-            let early_exit = self.blocks.iter().any(|block| {
+            let protected_early_exit = self.blocks.iter().any(|block| {
                 block.kind == BlockType::With && block.end > self.cur_offset
             }) && matches!(self.blocks.last().map(|block| block.kind),
                           Some(BlockType::If) | Some(BlockType::Else));
+            // CPython 3.14 can sink a constant-return protocol call
+            // immediately past the With's final protected fragment. The
+            // arm still owns it, and a later normal exit needs this slot.
+            let sunk_return_exit = self.version.at_least(3, 14)
+                && pos_args.len() == 3
+                && self.blocks.iter().any(|block| block.kind == BlockType::With)
+                && self.blocks.last().filter(|block| {
+                    matches!(block.kind, BlockType::If | BlockType::Else)
+                        && block.end > self.cur_offset
+                }).zip(self.idx_of.get(&self.cur_offset)).map_or(false, |(arm, &index)| {
+                    for item in self.instrs[index + 1..].iter().take_while(|item| item.offset < arm.end) {
+                        if item.op == Op::RETURN_VALUE { return true; }
+                        if !matches!(item.op,
+                            Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::GET_AWAITABLE
+                            | Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::SEND | Op::YIELD_VALUE
+                            | Op::RESUME | Op::JUMP_BACKWARD_NO_INTERRUPT | Op::END_SEND | Op::POP_TOP)
+                        { return false; }
+                    }
+                    false
+                });
+            let early_exit = protected_early_exit || sunk_return_exit;
             if !early_exit {
                 self.with_exits -= 1;
             }
@@ -47614,6 +47682,14 @@ impl<'a> Ctx<'a> {
                 });
             if next_awaitable {
                 self.with_exit_await_drop = true;
+                // The exit callable is deliberately absent from this
+                // modeled stack. Its exact three-None async protocol
+                // has been consumed, so that one expected underflow
+                // does not indicate missing user code. Preserve every
+                // incomplete diagnostic that preceded this call.
+                if missing_callable_slot && argc == 3 {
+                    self.clean = clean_before_call;
+                }
             }
             return;
         }
