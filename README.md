@@ -15,6 +15,14 @@ CPython 3.14 constructs encountered during static source recovery:
   separate bytecode verification.
 - Short-circuit values inside comprehension elements remain values rather than
   being mistaken for filters.
+- Chained inline-comprehension filters keep each guard's original polarity.
+  An accepting jump can land at the next guard rather than directly at the
+  append. The exact fall-through padding/back-edge span identifies that path;
+  general forward regions and classic skip jumps keep their existing handling.
+  Owned list/set/dictionary fixtures compare exact instruction and exception
+  bytes, including positive/negative guards and conjunctions versus successive
+  filters. Additional fixtures check equality hooks, calls, short-circuit
+  evaluation and errors across three guards.
 - Filtered Python 3.14 generators retain `and`/`or` element values and rejection
   guards. The arm's first discard looks past NOT_TAKEN padding; an inverted
   continue guard becomes the generator filter without reverting to the legacy

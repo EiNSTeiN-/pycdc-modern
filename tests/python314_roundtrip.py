@@ -111,6 +111,87 @@ class Python314RoundTrip(unittest.TestCase):
         exec(compile(result.stdout, 'recovered_fixture.py', 'exec'), recovered)
         return original['select'], recovered['select']
 
+    def test_inline_comprehension_chained_filters_keep_each_polarity(self):
+        for kind in ('list', 'set', 'dict'):
+            for guard in ('isinstance(value, str)', 'not isinstance(value, str)'):
+                for join in (' and ', ' if '):
+                    element = 'value: value' if kind == 'dict' else 'value'
+                    opening, closing = ('[', ']') if kind == 'list' else ('{', '}')
+                    source = ('def select(values):\n'
+                              f'    return {opening}{element} for value in values '
+                              f'if {guard}{join}value{closing}\n')
+                    with self.subTest(kind=kind, guard=guard, join=join):
+                        original, recovered = self.recover(source)
+                        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                        self.assertEqual(original.__code__.co_exceptiontable,
+                                         recovered.__code__.co_exceptiontable)
+                        for values in ([], ['', 'kept', None, 0, 2, 'again'],
+                                       ['repeat', 'repeat', False, True]):
+                            self.assertEqual(recovered(values), original(values))
+
+    def test_inline_filter_accept_edge_preserves_calls_short_circuit_and_errors(self):
+        sources = (
+            'def select(rows, wanted):\n'
+            '    return [row.tag for row in rows if row.value == wanted '
+            'if row.ready() if row.final()]\n',
+            'def select(rows, wanted):\n'
+            '    return [row.tag for row in rows if row.value != wanted '
+            'if not row.ready() if row.final()]\n',
+        )
+        def exercise(function, inputs):
+            calls = []
+            class Value:
+                def __init__(self, row):
+                    self.row = row
+                def compare(self, name, wanted):
+                    calls.append((name, self.row.tag, wanted))
+                    if self.row.failure == name:
+                        raise ValueError(name + ' failed')
+                    return self.row.matches if name == 'eq' else not self.row.matches
+                def __eq__(self, wanted):
+                    return self.compare('eq', wanted)
+                def __ne__(self, wanted):
+                    return self.compare('ne', wanted)
+            class Row:
+                def __init__(self, tag, matches, ready, final, failure=''):
+                    self.tag, self.matches = tag, matches
+                    self.is_ready, self.is_final, self.failure = ready, final, failure
+                    self.value = Value(self)
+                def ready(self):
+                    calls.append(('ready', self.tag))
+                    if self.failure == 'ready':
+                        raise RuntimeError('ready failed')
+                    return self.is_ready
+                def final(self):
+                    calls.append(('final', self.tag))
+                    if self.failure == 'final':
+                        raise RuntimeError('final failed')
+                    return self.is_final
+            try:
+                result = function([Row(*row) for row in inputs], 'wanted')
+                outcome = ('value', result)
+            except (RuntimeError, ValueError) as error:
+                outcome = (type(error).__name__, str(error))
+            return outcome, calls
+        from itertools import product
+        inputs = [('case-' + str(index), *values) for index, values in
+                  enumerate(product((False, True), repeat=3))]
+        cases = ([], inputs,
+                 [('failure', True, True, True, 'eq')],
+                 [('failure', False, False, True, 'ne')],
+                 [('failure', True, True, True, 'ready')],
+                 [('failure', False, False, True, 'ready')],
+                 [('failure', True, True, True, 'final')],
+                 [('failure', False, False, True, 'final')])
+        for source in sources:
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable,
+                             recovered.__code__.co_exceptiontable)
+            for rows in cases:
+                with self.subTest(source=source, rows=rows):
+                    self.assertEqual(exercise(recovered, rows), exercise(original, rows))
+
     def test_padded_exception_returns_keep_the_mainline_value_build(self):
         import dis
         import types
