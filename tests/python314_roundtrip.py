@@ -62,6 +62,60 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_multiple_keyword_expansions_preserve_merge_checks_and_order(self):
+        expressions = (
+            'fn(1, fixed=2, **first, **second)',
+            'fn(1, **first, fixed=2, **second)',
+            'fn(1, **first, **second)',
+            "fn(1, **{'fixed': 2, **first, **second})",
+            "fn(1, **{'my col': 2, **first, **second})",
+        )
+        for expression in expressions:
+            original, recovered = self.recover(
+                'def select(fn, first, second):\n    return ' + expression + '\n'
+            )
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            for first, second in (
+                ({'a': 1}, {'b': 2}),
+                ({'fixed': 9}, {}),
+                ({'a': 1}, {'a': 2}),
+                ({}, {7: 'invalid key'}),
+                (None, {}),
+            ):
+                outcomes = []
+                for function in (original, recovered):
+                    calls = []
+                    def fn(*args, **kwargs):
+                        calls.append((args, kwargs))
+                        return kwargs
+                    try:
+                        value = ('return', function(fn, first, second))
+                    except TypeError:
+                        value = ('raise', 'TypeError')
+                    outcomes.append((value, calls))
+                with self.subTest(expression=expression, first=first, second=second):
+                    self.assertEqual(outcomes[1], outcomes[0])
+        original, recovered = self.recover('''def select(fn, get_first, get_second):
+    return fn(1, fixed=2, **get_first(), **get_second())
+''')
+        for duplicate in (False, True):
+            outcomes = []
+            for function in (original, recovered):
+                events = []
+                def first():
+                    events.append('first')
+                    return {'fixed': 9} if duplicate else {'a': 1}
+                def second():
+                    events.append('second')
+                    return {'b': 2}
+                try:
+                    result = function(lambda *args, **kwargs: kwargs, first, second)
+                except TypeError:
+                    result = 'duplicate'
+                outcomes.append((result, events))
+            self.assertEqual(outcomes[1], outcomes[0])
+            self.assertEqual(outcomes[1][1], ['first'] if duplicate else ['first', 'second'])
+
     def test_padded_none_handler_tail_does_not_consume_following_timestamp_branch(self):
         import types
         from datetime import datetime, timezone

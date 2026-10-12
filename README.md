@@ -310,3 +310,14 @@ conversion errors. The owned Python 3.14 suite has 47 methods, including exact
 code/exception comparisons on ordinary fixtures, paired errors/cancellation,
 mutable identity, and padded timestamp scope controls. Full protected-corpus
 retention remains a separate required publication gate.
+
+The 0.6.18 development work retains separate ordered keyword expansions in
+`CALL_FUNCTION_EX`. `fn(fixed=2, **first, **second)` must reject duplicate keys
+before evaluating later expansions; a dictionary intentionally constructed with
+updates must keep its overwrite semantics. Merge boundaries are retained when
+an expanded argument is itself a constructed dictionary, and unnamed keyword
+entries render with `**`. The Python 3.14 suite passes 48 methods, including
+direct expansions, named arguments between expansions, intentional dictionary
+updates, invalid mappings/keys, and factory evaluation order. The 35 Rust tests
+also pass. Protected-corpus coverage and the stable branch remain at the
+preceding checkpoint until a complete unchanged-input retention audit passes.
