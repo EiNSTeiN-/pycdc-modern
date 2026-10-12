@@ -417,6 +417,25 @@ class Python314RoundTrip(unittest.TestCase):
         self.assertEqual(recovered.__code__.co_exceptiontable, original.__code__.co_exceptiontable)
         self.assertEqual(recovered.__code__.co_varnames, original.__code__.co_varnames)
 
+    def test_negated_loop_comparison_keeps_nan_and_original_rich_operator(self):
+        original, recovered = self.recover(
+            'def select(values):\n'
+            '    for value in values:\n'
+            '        if not value < 10:\n            continue\n'
+            '        return value\n')
+        for values in ([], [float('nan'), 3], [float('nan')], [20, 5], [-1, 20]):
+            self.assertEqual(recovered(values), original(values))
+        def exercise(function):
+            calls = []
+            class Value:
+                def __init__(self, label, number): self.label, self.number = label, number
+                def __lt__(self, limit): calls.append((self.label, 'lt', limit)); return self.number < limit
+                def __ge__(self, limit): raise AssertionError('Must not invert rich comparison')
+            result = function([Value('skip', 20), Value('take', 5)])
+            return result.label, calls
+        self.assertEqual(exercise(recovered), exercise(original))
+        self.assertEqual(recovered.__code__.co_code, original.__code__.co_code)
+
     def test_negated_chain_evaluates_middle_call_once(self):
         original, recovered = self.recover(
             'def select(value):\n'

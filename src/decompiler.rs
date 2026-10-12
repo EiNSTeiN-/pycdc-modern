@@ -31127,7 +31127,22 @@ return None;
                     && steps[0].target == Some(top) && steps[0].end() == target
                 {
                     self.push_stmt(Stmt::If {
-                        cond: if jump_if_true { negate_cond(cond) } else { cond },
+                        // 3.14 negates a comparison guard by its jump, not
+                        // its operator. Folding `<` to `>=` changes NaN and
+                        // user comparison hooks. None-identity guards use
+                        // their dedicated jump spelling and can invert IS.
+                        cond: if jump_if_true {
+                            match &*cond {
+                                Expr::Compare { operands, ops }
+                                    if ops.len() == 1
+                                        && matches!(ops[0], CmpOp::Is | CmpOp::IsNot)
+                                        && operands.len() == 2
+                                        && operands.iter().any(|value| matches!(&**value,
+                                            Expr::Const(object) if matches!(&**object, PyObject::None))) =>
+                                { negate_cond(cond) }
+                                _ => simplify_not_or_wrap(cond),
+                            }
+                        } else { cond },
                         body: vec![Stmt::Continue], orelse: Vec::new(),
                     });
                     self.skip_until = Some(target);
