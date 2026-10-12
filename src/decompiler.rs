@@ -7630,6 +7630,12 @@ impl<'a> Ctx<'a> {
         while k2 < self.instrs.len() {
             let c = &self.instrs[k2];
             match c.op {
+                Op::NOP | Op::NOT_TAKEN | Op::CACHE => {
+                    // Padding does not end the post-POP_EXCEPT return
+                    // trailer. Keep scanning through it so an unnamed
+                    // handler retains its already loaded return value.
+                    k2 += 1;
+                }
                 Op::LOAD_CONST | Op::STORE_FAST | Op::STORE_NAME
                 | Op::DELETE_FAST | Op::DELETE_NAME | Op::STORE_DEREF
                 | Op::DELETE_DEREF => {
@@ -16809,6 +16815,16 @@ impl<'a> Ctx<'a> {
                         self.pop();
                     }
                     if inst.offset < end {
+                        // The inline target stores already consumed this
+                        // inner iterator in our expression stack. CPython's
+                        // separate iterator slot still needs POP_ITER (or
+                        // POP_TOP) cleanup; applying it here would discard
+                        // the comprehension accumulator instead.
+                        if popiter_follows && self.version.at_least(3, 13) {
+                            if let Some(&ci) = self.idx_of.get(&inst.offset) {
+                                self.skip_until = Some(self.instrs[ci + 1].end());
+                            }
+                        }
                         return true; // inner loop cleanup
                     }
                     self.finish_inline_comp();

@@ -251,3 +251,18 @@ Design informed by [Decompyle++ (pycdc)](https://github.com/zrax/pycdc), [uncomp
 ## License
 
 [MIT](LICENSE)
+
+### Python 3.14 handler and comprehension cleanup
+
+The recovery fork retains unnamed exception-handler return values across NOP,
+NOT_TAKEN, and CACHE padding. Its post-POP_EXCEPT scan continues through padding
+before deciding whether the handler ends in a return; real jumps and handler
+boundaries remain significant. Owned async fixtures cover successful saves,
+custom failures, ordinary failures, and cancellation with 1, 3, and 9 NOPs.
+
+Within a PEP 709 inline comprehension, target stores consume the modeled inner
+iterator. The following VM iterator cleanup must not consume the accumulator.
+The decoder suppresses that cleanup only at an inner END_FOR in an active
+comprehension. Four- and six-target list/set/dict fixtures retain both exact
+bytecode and exception tables, saved target variables, ordinary loops afterward,
+and errors during iteration/unpacking. No general POP_ITER suppression is used.

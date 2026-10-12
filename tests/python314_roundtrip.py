@@ -453,6 +453,69 @@ class Python314RoundTrip(unittest.TestCase):
             self.assertEqual(asyncio.run(exercise(original, payload, result)), expected)
             self.assertEqual(asyncio.run(exercise(recovered, payload, result)), expected)
 
+    def test_padded_unnamed_handler_retains_false_return_before_success_tail(self):
+        import types
+        source = ('async def select(value):\n'
+                  '    try:\n        await sink(value)\n        log("saved")\n'
+                  '    except CustomError:\n        notify("locked")\n        return False\n'
+                  '    except Exception as error:\n        log("failed", error)\n        return False\n'
+                  '    return True\n')
+        module = compile(source, 'owned-original', 'exec', dont_inherit=True)
+        code = next(v for v in module.co_consts if isinstance(v, types.CodeType))
+        for padding in (1, 3, 9):
+            padded = pad_return_values(self, code, padding)
+            exported = module.replace(co_consts=tuple(padded if v is code else v for v in module.co_consts))
+            original, recovered = self.recover_code(exported)
+            async def exercise(function, failure):
+                calls = []
+                class CustomError(Exception): pass
+                async def sink(value):
+                    calls.append(('sink', value))
+                    await asyncio.sleep(0)
+                    if failure == 'custom': raise CustomError('owned locked')
+                    if failure == 'ordinary': raise ValueError('owned ordinary')
+                    if failure == 'cancel': raise asyncio.CancelledError('owned cancelled')
+                def log(*values):
+                    calls.append(tuple(str(value) for value in values))
+                function.__globals__.update(sink=sink, log=log, CustomError=CustomError,
+                                            notify=lambda value: calls.append(('notify', value)))
+                try: outcome = ('value', await function(7))
+                except asyncio.CancelledError as error: outcome = ('cancelled', str(error))
+                return outcome, calls
+            for failure in ('', 'custom', 'ordinary', 'cancel'):
+                with self.subTest(padding=padding, failure=failure):
+                    expected = asyncio.run(exercise(original, failure))
+                    self.assertEqual(asyncio.run(exercise(recovered, failure)), expected)
+                    if failure in ('custom', 'ordinary'):
+                        self.assertEqual(expected[0], ('value', False))
+
+    def test_nested_inline_comprehension_cleanup_keeps_four_and_six_targets(self):
+        expressions = ('[(a, c) for a, b in data for c, d in b]',
+                       '{(a, c) for a, b in data for c, d in b}',
+                       '{(a, c): d for a, b in data for c, d in b}',
+                       '[(a, c, e) for a, b in data for c, d in b for e, f in d]')
+        for expression in expressions:
+            # Saved target names must survive; actual post-loop assignments
+            # and ordinary loop cleanup must still execute normally.
+            source = ('def select(data):\n'
+                      '    a, b, c, d, e, f = 10, 20, 30, 40, 50, 60\n'
+                      f'    result = {expression}\n'
+                      '    after = 0\n    for number in (1, 2, 3):\n        after += number\n'
+                      '    return result, (a, b, c, d, e, f), after\n')
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            data = [(1, [(2, [(3, 4), (5, 6)])])] if 'for e, f' in expression else [(1, [(2, 3), (4, 5)]), (6, [])]
+            for values in ([], data, [(1, [(2,)])], [None], None):
+                outputs = []
+                for function in (original, recovered):
+                    try: outcome = ('value', function(values))
+                    except (TypeError, ValueError) as error: outcome = (type(error).__name__, str(error))
+                    outputs.append(outcome)
+                with self.subTest(expression=expression, values=values):
+                    self.assertEqual(outputs[1], outputs[0])
+            self.assertEqual(recovered(data)[1:], ((10, 20, 30, 40, 50, 60), 6))
+
     def test_padded_try_return_consumes_its_existing_calculated_value(self):
         import types
         expressions = ('make(value)', 'make(value).result',
