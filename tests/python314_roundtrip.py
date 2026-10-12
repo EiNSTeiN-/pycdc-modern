@@ -57,6 +57,43 @@ class Python314RoundTrip(unittest.TestCase):
         for values in ([], [(1, 2, 3, 4)], [(5, 6, 7, 8), (9, 10, 11, 12)]):
             self.assertEqual(recovered(values), original(values))
 
+    def test_filtered_generator_keeps_value_preserving_boolops(self):
+        for expression in ('row[1] or 0', 'row[1] and row[2]',
+                           'row[1] or row[2] or 0', '(row[1] and row[2]) or 0'):
+            original, recovered = self.check_generator_bytes(
+                'def select(rows):\n'
+                f'    return tuple({expression} for row in rows if row[0])\n')
+            for rows in ([], [(False, 3, 4)], [(True, 0, 2)],
+                         [(True, 2, 3), (True, None, 4), (False, 5, 6)],
+                         [(True, '', 7), (True, 'kept', 8)]):
+                self.assertEqual(recovered(rows), original(rows))
+
+    def test_generator_none_filter_and_boolop_keep_truth_and_call_order(self):
+        original, recovered = self.check_generator_bytes(
+            'def select(rows):\n'
+            '    return tuple(row.get("amount") or 0.0 for row in rows if row.get("amount") is not None)\n')
+        def exercise(function):
+            calls = []
+            class Value:
+                def __init__(self, tag, truth):
+                    self.tag, self.truth = tag, truth
+                def __bool__(self):
+                    calls.append(('bool', self.tag))
+                    return self.truth
+            class Row:
+                def __init__(self, tag, value):
+                    self.tag, self.value = tag, value
+                def get(self, key):
+                    calls.append(('get', self.tag, key))
+                    return self.value
+            values = [Row('missing', None), Row('zero', 0),
+                      Row('false', Value('false', False)),
+                      Row('true', Value('true', True))]
+            result = function(values)
+            return tuple(value.tag if isinstance(value, Value) else value
+                         for value in result), calls
+        self.assertEqual(exercise(recovered), exercise(original))
+
     def recover(self, source):
         code = compile(source, 'fixture.py', 'exec')
         return self.recover_code(code)

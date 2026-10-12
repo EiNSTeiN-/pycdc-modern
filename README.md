@@ -15,6 +15,11 @@ CPython 3.14 constructs encountered during static source recovery:
   separate bytecode verification.
 - Short-circuit values inside comprehension elements remain values rather than
   being mistaken for filters.
+- Filtered Python 3.14 generators retain `and`/`or` element values and rejection
+  guards. The arm's first discard looks past NOT_TAKEN padding; an inverted
+  continue guard becomes the generator filter without reverting to the legacy
+  expression simulator. Owned fixtures compare exact generator instruction and
+  exception bytes, false/None/true values, and truth-test/getter call order.
 - Large dictionary displays inside comprehensions keep their own `MAP_ADD 1`
   operations.
 - Shared rejection guards preserve missing-value and ordinary truth tests,

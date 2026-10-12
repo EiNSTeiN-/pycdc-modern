@@ -42932,7 +42932,12 @@ impl<'a> Ctx<'a> {
                 && self
                     .idx_of
                     .get(&self.cur_offset)
-                    .and_then(|&pi| (pi > 0).then(|| &self.instrs[pi - 1]))
+                    // 3.14 inserts NOT_TAKEN after the conditional jump.
+                    // It does not consume the retained operand: the first
+                    // meaningful instruction in the arm is still its pop.
+                    .and_then(|&pi| self.instrs[..pi].iter().rev().find(|p| {
+                        !matches!(p.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    }))
                     .map_or(false, |p| {
                         matches!(p.op, Op::POP_JUMP_IF_FALSE | Op::POP_JUMP_IF_TRUE)
                             && !p.is_backward
@@ -51381,6 +51386,17 @@ fn generator_parts_from_body(
                 });
                 result = generator_parts_from_body(body, generators);
                 if result.is_none() { return None; }
+            }
+            // 3.14 filters reject an iteration via a forward conditional
+            // followed by NOT_TAKEN/JUMP_BACKWARD. The statement parser
+            // preserves that as an inverted continue guard, with the yield
+            // following it. Keep using that parser's element expression;
+            // falling back to the legacy simulator loses COPY/TO_BOOL
+            // value merges such as `row[1] or 0`.
+            Stmt::If { cond, body, orelse }
+                if orelse.is_empty() && matches!(body.as_slice(), [Stmt::Continue]) => {
+                if result.is_some() { return None; }
+                generators.last_mut()?.ifs.push(negate_cond(cond.clone()));
             }
             Stmt::If { cond, body, orelse } if orelse.is_empty() => {
                 generators.last_mut()?.ifs.push(cond.clone());
