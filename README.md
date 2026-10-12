@@ -60,6 +60,14 @@ CPython 3.14 constructs encountered during static source recovery:
   Masked padding is never treated as a value-building tail or used to swallow
   a later success response. Owned fixtures cover padded sequential handlers
   and a genuine sunk value tail with an `else` path.
+- A Python 3.14 padded `RETURN_VALUE` after a protected calculation consumes
+  the live value already on the parser stack. The existing tail recognizer
+  accepts only padding and one unwalked return; the value repair additionally
+  requires exactly one expression on the stack and no with protocol. It does
+  not re-evaluate the calculation or supply a result for an empty stack.
+  Owned fixtures cover call, attribute, tuple and dictionary results with
+  several padding widths, false values, handled errors, fallback errors and
+  base exceptions. An explicit bare-return fixture keeps its side effect.
 - Compiler StopIteration routes remain frame machinery when bounding lexical
   handler chains. Shared continuations after handled exceptions stay outside
   those chains, preserving later generator expressions and sequential work.

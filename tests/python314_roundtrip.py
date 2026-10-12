@@ -14,6 +14,52 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('PYCDC_BINARY', str(ROOT / 'target/debug/pycdc')))
 
 
+def pad_return_values(test, code, count=3):
+    """Add owned padding while retaining jumps and exact handler boundaries."""
+    import dis
+    instructions = list(dis.get_instructions(code))
+    # This owned compact fixture needs no extended operands. NOPs
+    # reproduce the masked-exit layout, preserving the return's value.
+    test.assertFalse(any(item.opname == 'EXTENDED_ARG' for item in instructions))
+    starts, sizes, cursor = {}, {}, 0
+    for index, item in enumerate(instructions):
+        starts[item.offset] = cursor
+        end = instructions[index + 1].offset if index + 1 < len(instructions) else len(code.co_code)
+        sizes[item.offset] = end - item.offset
+        cursor += sizes[item.offset] + (2 * count if item.opname == 'RETURN_VALUE' else 0)
+    starts[len(code.co_code)] = cursor
+    output = bytearray()
+    for item in instructions:
+        if item.opname == 'RETURN_VALUE':
+            output.extend(bytes((dis.opmap['NOP'], 0)) * count)
+        actual = len(output)
+        raw = bytearray(code.co_code[item.offset:item.offset + sizes[item.offset]])
+        if item.opcode in dis.hasjump:
+            delta = (starts[item.argval] - (actual + sizes[item.offset])) // 2
+            operand = -delta if 'BACKWARD' in item.opname else delta
+            test.assertTrue(0 <= operand <= 255)
+            raw[1] = operand
+        output.extend(raw)
+    def varint(value, marker=False):
+        digits = [value & 63]
+        while value >> 6:
+            value >>= 6
+            digits.append(value & 63)
+        digits.reverse()
+        for index in range(len(digits) - 1):
+            digits[index] |= 64
+        if marker:
+            digits[0] |= 128
+        return bytes(digits)
+    table = b''.join(varint(starts[row.start] // 2, True)
+                     + varint((starts[row.end] - starts[row.start]) // 2)
+                     + varint(starts[row.target] // 2)
+                     + varint((row.depth << 1) | row.lasti)
+                     for row in dis.Bytecode(code).exception_entries)
+    padded = code.replace(co_code=bytes(output), co_exceptiontable=table, co_linetable=b'')
+    return padded
+
+
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
     def check_generator_bytes(self, source):
@@ -379,46 +425,7 @@ class Python314RoundTrip(unittest.TestCase):
             '                    headers={"Cache-Control": "no-store"})\n')
         module = compile(source, 'fixture.py', 'exec')
         code = next(value for value in module.co_consts if isinstance(value, types.CodeType))
-        instructions = list(dis.get_instructions(code))
-        # This owned compact fixture needs no extended operands. Three NOPs
-        # reproduce the masked-exit layout, preserving the return's value.
-        self.assertFalse(any(item.opname == 'EXTENDED_ARG' for item in instructions))
-        starts, sizes, cursor = {}, {}, 0
-        for index, item in enumerate(instructions):
-            starts[item.offset] = cursor
-            end = instructions[index + 1].offset if index + 1 < len(instructions) else len(code.co_code)
-            sizes[item.offset] = end - item.offset
-            cursor += sizes[item.offset] + (6 if item.opname == 'RETURN_VALUE' else 0)
-        starts[len(code.co_code)] = cursor
-        output = bytearray()
-        for item in instructions:
-            if item.opname == 'RETURN_VALUE':
-                output.extend(bytes((dis.opmap['NOP'], 0)) * 3)
-            actual = len(output)
-            raw = bytearray(code.co_code[item.offset:item.offset + sizes[item.offset]])
-            if item.opcode in dis.hasjump:
-                delta = (starts[item.argval] - (actual + sizes[item.offset])) // 2
-                operand = -delta if 'BACKWARD' in item.opname else delta
-                self.assertTrue(0 <= operand <= 255)
-                raw[1] = operand
-            output.extend(raw)
-        def varint(value, marker=False):
-            digits = [value & 63]
-            while value >> 6:
-                value >>= 6
-                digits.append(value & 63)
-            digits.reverse()
-            for index in range(len(digits) - 1):
-                digits[index] |= 64
-            if marker:
-                digits[0] |= 128
-            return bytes(digits)
-        table = b''.join(varint(starts[row.start] // 2, True)
-                         + varint((starts[row.end] - starts[row.start]) // 2)
-                         + varint(starts[row.target] // 2)
-                         + varint((row.depth << 1) | row.lasti)
-                         for row in dis.Bytecode(code).exception_entries)
-        padded = code.replace(co_code=bytes(output), co_exceptiontable=table, co_linetable=b'')
+        padded = pad_return_values(self, code)
         module = module.replace(co_consts=tuple(padded if value is code else value for value in module.co_consts))
         original, recovered = self.recover_code(module)
         plain_namespace = {}
@@ -445,6 +452,97 @@ class Python314RoundTrip(unittest.TestCase):
             expected = asyncio.run(exercise(plain_namespace['select'], payload, result))
             self.assertEqual(asyncio.run(exercise(original, payload, result)), expected)
             self.assertEqual(asyncio.run(exercise(recovered, payload, result)), expected)
+
+    def test_padded_try_return_consumes_its_existing_calculated_value(self):
+        import types
+        expressions = ('make(value)', 'make(value).result',
+                       '(make(value), 7)', '{"value": make(value)}')
+        for expression in expressions:
+            source = ('def select(value):\n'
+                      '    if value:\n        try:\n'
+                      f'            return {expression}\n'
+                      '        except Exception:\n            pass\n'
+                      '    return (fallback.read if True else None)().result or default.result\n')
+            module = compile(source, 'owned-original', 'exec', dont_inherit=True)
+            code = next(v for v in module.co_consts if isinstance(v, types.CodeType))
+            plain = {}; exec(module, plain)
+            for padding in (1, 3, 9):
+                padded = pad_return_values(self, code, padding)
+                exported = module.replace(co_consts=tuple(
+                    padded if v is code else v for v in module.co_consts))
+                original, recovered = self.recover_code(exported)
+                def exercise(function, truth, result, failure):
+                    calls = []
+                    class Value:
+                        def __bool__(self):
+                            calls.append('truth')
+                            if failure == 'truth': raise ValueError('truth failed')
+                            return truth
+                    class Result:
+                        @property
+                        def result(self):
+                            calls.append('result')
+                            if failure == 'attribute': raise AttributeError('result failed')
+                            return result
+                    class Fallback:
+                        def read(self):
+                            calls.append('fallback')
+                            if failure == 'fallback': raise RuntimeError('fallback failed')
+                            return types.SimpleNamespace(result='fallback-result')
+                    def make(value):
+                        calls.append('make')
+                        if failure == 'make': raise KeyError('make failed')
+                        if failure == 'base': raise KeyboardInterrupt('owned interrupt')
+                        return Result() if expression == 'make(value).result' else result
+                    function.__globals__.update(make=make, fallback=Fallback(),
+                                                default=types.SimpleNamespace(result='default'))
+                    try:
+                        outcome = ('value', function(Value()))
+                    except (Exception, KeyboardInterrupt) as error:
+                        outcome = (type(error).__name__, str(error))
+                    return outcome, calls
+                for truth in (False, True):
+                    for result in (None, 0, 'success'):
+                        for failure in ('', 'truth', 'attribute', 'make', 'base', 'fallback'):
+                            expected = exercise(plain['select'], truth, result, failure)
+                            with self.subTest(expression=expression, padding=padding,
+                                              truth=truth, result=result, failure=failure):
+                                self.assertEqual(exercise(original, truth, result, failure), expected)
+                                self.assertEqual(exercise(recovered, truth, result, failure), expected)
+                self.assertEqual(exercise(recovered, False, None, '')[0],
+                                 ('value', 'fallback-result'))
+                if expression == 'make(value)':
+                    self.assertEqual(exercise(recovered, True, None, ''),
+                                     (('value', None), ['truth', 'make']))
+
+    def test_padded_explicit_bare_return_keeps_only_the_side_effect(self):
+        import types
+        source = ('def select(value):\n'
+                  '    if value:\n        try:\n            make(value)\n            return None\n'
+                  '        except Exception:\n            return "handled"\n'
+                  '    return (fallback.read if True else None)().result or default.result\n')
+        module = compile(source, 'owned-original', 'exec', dont_inherit=True)
+        code = next(v for v in module.co_consts if isinstance(v, types.CodeType))
+        padded = pad_return_values(self, code)
+        module = module.replace(co_consts=tuple(padded if v is code else v for v in module.co_consts))
+        original, recovered = self.recover_code(module)
+        for truth, fails in ((False, False), (True, False), (True, True)):
+            outcomes = []
+            for function in (original, recovered):
+                calls = []
+                def make(value):
+                    calls.append('make')
+                    if fails: raise ValueError('owned failure')
+                    return 'discarded'
+                def read():
+                    calls.append('fallback'); return types.SimpleNamespace(result='fallback')
+                function.__globals__.update(make=make, fallback=types.SimpleNamespace(read=read),
+                                            default=types.SimpleNamespace(result='default'))
+                outcomes.append((function(truth), calls))
+            self.assertEqual(outcomes[1], outcomes[0])
+            self.assertEqual(outcomes[0], (None, ['make']) if truth and not fails
+                             else ('handled', ['make']) if truth
+                             else ('fallback', ['fallback']))
 
     def test_real_sunk_value_tail_keeps_its_else_path(self):
         from types import SimpleNamespace
