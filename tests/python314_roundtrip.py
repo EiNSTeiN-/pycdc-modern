@@ -18,6 +18,9 @@ BINARY = Path(os.environ.get('PYCDC_BINARY', str(ROOT / 'target/debug/pycdc')))
 class Python314RoundTrip(unittest.TestCase):
     def recover(self, source):
         code = compile(source, 'fixture.py', 'exec')
+        return self.recover_code(code)
+
+    def recover_code(self, code):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory) / 'fixture.pyc'
             file.write_bytes(importlib.util.MAGIC_NUMBER + bytes(12) + marshal.dumps(code))
@@ -29,6 +32,131 @@ class Python314RoundTrip(unittest.TestCase):
         exec(code, original)
         exec(compile(result.stdout, 'recovered_fixture.py', 'exec'), recovered)
         return original['select'], recovered['select']
+
+    def test_padded_exception_returns_keep_the_mainline_value_build(self):
+        import dis
+        import types
+        source = (
+            'async def select(read, work, response):\n'
+            '    try:\n        payload = await read()\n'
+            '    except Exception:\n        return response({"error": "invalid_json"}, status=400)\n'
+            '    if not isinstance(payload, dict):\n'
+            '        return response({"error": "invalid_payload"}, status=400)\n'
+            '    try:\n        request_id = int(payload["request_id"])\n'
+            '    except (KeyError, TypeError, ValueError):\n'
+            '        return response({"error": "invalid_payload"}, status=400)\n'
+            '    try:\n        result = await work(request_id)\n'
+            '    except Exception as error:\n'
+            '        reason = str(getattr(error, "key", None) or "request_failed")\n'
+            '        status = 403 if reason in {"forbidden", "license_required"} else 400\n'
+            '        return response({"error": reason}, status=status)\n'
+            '    return response({"success": True, **(result if isinstance(result, dict) else {})},\n'
+            '                    headers={"Cache-Control": "no-store"})\n')
+        module = compile(source, 'fixture.py', 'exec')
+        code = next(value for value in module.co_consts if isinstance(value, types.CodeType))
+        instructions = list(dis.get_instructions(code))
+        # This owned compact fixture needs no extended operands. Three NOPs
+        # reproduce the masked-exit layout, preserving the return's value.
+        self.assertFalse(any(item.opname == 'EXTENDED_ARG' for item in instructions))
+        starts, sizes, cursor = {}, {}, 0
+        for index, item in enumerate(instructions):
+            starts[item.offset] = cursor
+            end = instructions[index + 1].offset if index + 1 < len(instructions) else len(code.co_code)
+            sizes[item.offset] = end - item.offset
+            cursor += sizes[item.offset] + (6 if item.opname == 'RETURN_VALUE' else 0)
+        starts[len(code.co_code)] = cursor
+        output = bytearray()
+        for item in instructions:
+            if item.opname == 'RETURN_VALUE':
+                output.extend(bytes((dis.opmap['NOP'], 0)) * 3)
+            actual = len(output)
+            raw = bytearray(code.co_code[item.offset:item.offset + sizes[item.offset]])
+            if item.opcode in dis.hasjump:
+                delta = (starts[item.argval] - (actual + sizes[item.offset])) // 2
+                operand = -delta if 'BACKWARD' in item.opname else delta
+                self.assertTrue(0 <= operand <= 255)
+                raw[1] = operand
+            output.extend(raw)
+        def varint(value, marker=False):
+            digits = [value & 63]
+            while value >> 6:
+                value >>= 6
+                digits.append(value & 63)
+            digits.reverse()
+            for index in range(len(digits) - 1):
+                digits[index] |= 64
+            if marker:
+                digits[0] |= 128
+            return bytes(digits)
+        table = b''.join(varint(starts[row.start] // 2, True)
+                         + varint((starts[row.end] - starts[row.start]) // 2)
+                         + varint(starts[row.target] // 2)
+                         + varint((row.depth << 1) | row.lasti)
+                         for row in dis.Bytecode(code).exception_entries)
+        padded = code.replace(co_code=bytes(output), co_exceptiontable=table, co_linetable=b'')
+        module = module.replace(co_consts=tuple(padded if value is code else value for value in module.co_consts))
+        original, recovered = self.recover_code(module)
+        plain_namespace = {}
+        exec(compile(source, 'plain_fixture.py', 'exec'), plain_namespace)
+        async def exercise(function, payload, result):
+            calls = []
+            async def read():
+                calls.append('read')
+                if isinstance(payload, Exception):
+                    raise payload
+                return payload
+            async def work(request_id):
+                calls.append(('work', request_id))
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            def response(value, **options):
+                return value, options
+            return await function(read, work, response), calls
+        cases = [(ValueError('owned failure'), None), ([], None), ({}, None),
+                 ({'request_id': 'bad'}, None), ({'request_id': '7'}, {'value': 3}),
+                 ({'request_id': 7}, None), ({'request_id': 7}, RuntimeError('owned failure'))]
+        for payload, result in cases:
+            expected = asyncio.run(exercise(plain_namespace['select'], payload, result))
+            self.assertEqual(asyncio.run(exercise(original, payload, result)), expected)
+            self.assertEqual(asyncio.run(exercise(recovered, payload, result)), expected)
+
+    def test_real_sunk_value_tail_keeps_its_else_path(self):
+        from types import SimpleNamespace
+        original, recovered = self.recover(
+            'def select(value):\n'
+            '    try:\n        entry = value.entry\n'
+            '    except AttributeError:\n        kind = "missing"\n'
+            '    else:\n        kind = "present"\n'
+            '    return kind, value\n')
+        for value in (object(), SimpleNamespace(entry=3)):
+            expected = original(value)
+            result = recovered(value)
+            self.assertEqual(result, expected)
+            self.assertIs(result[1], value)
+
+    def test_shared_rejection_guard_keeps_factory_returns_and_truth_tests(self):
+        for source, values in (
+            ('def select(value, build):\n'
+             '    if value is None or not 0.0 <= value <= 20.0:\n'
+             '        return build("reject", amount=0)\n'
+             '    return build("accept", amount=value)\n',
+             (None, -1.0, 0.0, 20.0, 21.0, float('nan'))),
+            ('def select(value, build):\n'
+             '    if not value or len(value) < 2:\n'
+             '        return build("reject", amount=0)\n'
+             '    return build("accept", amount=len(value))\n',
+             ([], [1], [1, 2], [1, 2, 3]))):
+            original, recovered = self.recover(source)
+            for value in values:
+                outputs = []
+                for function in (original, recovered):
+                    calls = []
+                    def build(kind, **options):
+                        calls.append((kind, options))
+                        return kind, options
+                    outputs.append((function(value, build), calls))
+                self.assertEqual(outputs[1], outputs[0])
 
     def test_constant_and_conditional_class_annotation_gates(self):
         import types

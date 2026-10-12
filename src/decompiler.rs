@@ -29136,6 +29136,27 @@ return None;
                 Op::PUSH_NULL => {
                     st.push(self.name_expr("\u{0}null"));
                 }
+                Op::MAKE_FUNCTION if self.version.at_least(3, 14) => {
+                    let value = st.pop()?;
+                    let Expr::Const(value) = &*value else { return None; };
+                    let PyObject::Code(code) = &**value else { return None; };
+                    if code.name != "<genexpr>" { return None; }
+                    st.push(Rc::new(Expr::Function(Rc::new(FunctionDef {
+                        name: code.name.clone(), code: code.clone(), params: Parameters::empty(),
+                        decorators: Vec::new(), returns: None, is_async: false, type_params: Vec::new(),
+                    }))));
+                }
+                Op::SET_FUNCTION_ATTRIBUTE if ins.arg == 8 => {
+                    let function = st.pop()?;
+                    let closure = st.pop()?;
+                    let Expr::Function(definition) = &*function else { return None; };
+                    let Expr::Tuple(cells) = &*closure else { return None; };
+                    if cells.len() != definition.code.freevars.len() { return None; }
+                    // Captures are already resolved by position in the input
+                    // normalizer. They are lexical names in the source.
+                    st.push(function);
+                }
+                Op::GET_ITER => {}
                 Op::COPY => {
                     if arg == 0 || arg > st.len() { return None; }
                     st.push(st[st.len() - arg].clone());
@@ -29175,6 +29196,23 @@ return None;
                     } else {
                         arg
                     };
+                    if self.version.at_least(3, 14) && ins.op == Op::CALL && n == 0 && st.len() >= 2 {
+                        if let Expr::Function(definition) = &*st[st.len() - 2] {
+                            if definition.code.name == "<genexpr>" {
+                                let code = definition.code.clone();
+                                let outer = st.pop()?;
+                                st.pop();
+                                let decoded = decompile(&code, self.version).ok()?;
+                                let mut generators = Vec::new();
+                                let element = generator_parts_from_body(&decoded.body, &mut generators)?;
+                                generators.first_mut()?.iter = outer;
+                                st.push(Rc::new(Expr::Comprehension {
+                                    kind: CompKind::Generator, elt: element, key: None, generators,
+                                }));
+                                continue;
+                            }
+                        }
+                    }
                     let mut args = Vec::new();
                     for _ in 0..n {
                         args.push(pop1(&mut st));
@@ -29201,6 +29239,28 @@ return None;
                         keywords: Vec::new(),
                         star_args: None,
                         star_kwargs: None,
+                    }));
+                }
+                Op::CALL_KW => {
+                    let names = st.pop()?;
+                    let Expr::Const(names) = &*names else { return None; };
+                    let PyObject::Tuple(names) = &**names else { return None; };
+                    let names: Option<Vec<String>> = names.iter().map(|value| match &**value {
+                        PyObject::Str(name) => Some(name.clone()), _ => None,
+                    }).collect();
+                    let names = names?;
+                    if names.len() > arg || st.len() < arg + 1 { return None; }
+                    let all = st.split_off(st.len() - arg);
+                    let positional = arg - names.len();
+                    let args = all[..positional].to_vec();
+                    let keywords = names.into_iter().zip(all[positional..].iter().cloned())
+                        .map(|(name, value)| (Some(name), value)).collect();
+                    let is_null = |value: &ExprRef| matches!(&**value, Expr::Name(name) if name == "\u{0}null");
+                    let mut callable = st.pop()?;
+                    if is_null(&callable) { callable = st.pop()?; }
+                    if st.last().map_or(false, is_null) { st.pop(); }
+                    st.push(Rc::new(Expr::Call {
+                        func: callable, args, keywords, star_args: None, star_kwargs: None,
                     }));
                 }
                 Op::BINARY_OP => {
@@ -29974,21 +30034,15 @@ return None;
         Some(body_start)
     }
 
-    /// Recover a shared rejection block reached by a None-led OR guard.
+    /// Recover a shared rejection block reached by short-circuit tests.
     /// CPython 3.14 puts the last test's success jump over the reject block.
     /// Treating earlier None jumps as nested positive ifs loses rejection for
     /// missing values. A negated comparison chain also has a POP_TOP cleanup
     /// edge; retain its copied middle value to avoid evaluating it twice.
-    fn try_none_rejection_guard(
+    fn try_shared_rejection_guard(
         &self, first: &ExprRef, first_jump_true: bool, target: usize,
     ) -> Option<(ExprRef, Vec<Stmt>, usize)> {
         if !self.version.at_least(3, 14) || !self.stack.is_empty() || target <= self.cur_offset {
-            return None;
-        }
-        if !matches!(&**first, Expr::Compare { operands, ops }
-            if operands.len() == 2 && ops.len() == 1
-                && matches!(ops[0], CmpOp::Is | CmpOp::IsNot)
-                && matches!(&*operands[1], Expr::Const(value) if matches!(&**value, PyObject::None))) {
             return None;
         }
         let padding = |op| matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::EXTENDED_ARG);
@@ -30008,7 +30062,23 @@ return None;
             if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
             let value = self.code.consts.get(reject.arg as usize)?.clone();
             (vec![Stmt::Return(Some(Rc::new(Expr::Const(value))))], ret + 1)
-        } else { return None; };
+        } else {
+            // A rejection can return a constructed outcome rather than a
+            // literal. Accept only a straight value expression that leaves
+            // exactly one result before RETURN; no intervening branch/store.
+            let mut ret = reject_index;
+            while let Some(item) = self.instrs.get(ret) {
+                if item.op == Op::RETURN_VALUE { break; }
+                if item.is_jump() || matches!(item.op, Op::STORE_FAST | Op::STORE_NAME
+                    | Op::STORE_DEREF | Op::STORE_ATTR | Op::STORE_SUBSCR | Op::POP_EXCEPT
+                    | Op::PUSH_EXC_INFO | Op::RERAISE | Op::RAISE_VARARGS) { return None; }
+                ret += 1;
+            }
+            if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
+            let mut result = self.sim_stack_region(reject_index, ret, Vec::new())?;
+            if result.len() != 1 { return None; }
+            (vec![Stmt::Return(Some(result.pop()?))], ret + 1)
+        };
         let equivalent_return = |index: usize| -> Option<usize> {
             let Some(Stmt::Return(Some(expected))) = body.first() else { return None; };
             let Expr::Const(expected) = &**expected else { return None; };
@@ -30112,7 +30182,7 @@ return None;
     fn handle_cond_jump(&mut self, cond: ExprRef, jump_if_true: bool, target: usize) {
         // tail-duplicated body copy: aim the jump at the original body
         let target = self.dup_copy_redirect.get(&target).copied().unwrap_or(target);
-        if let Some((guard, body, resume)) = self.try_none_rejection_guard(&cond, jump_if_true, target) {
+        if let Some((guard, body, resume)) = self.try_shared_rejection_guard(&cond, jump_if_true, target) {
             self.push_stmt(Stmt::If { cond: guard, body, orelse: Vec::new() });
             self.skip_until = Some(resume);
             return;
@@ -44175,6 +44245,24 @@ impl<'a> Ctx<'a> {
             .iter()
             .map(|x| (canon(x.op), x.arg))
             .collect();
+        // Masked runtime exits can leave padding between POP_EXCEPT and
+        // a return whose value was computed earlier. Padding is not a
+        // value-building tail: matching it against the mainline would
+        // swallow the actual response/call and resume with an empty stack.
+        // Look through padding, then require a real independent value head.
+        let head = tail.iter().find(|(op, _)| !matches!(
+            op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::EXTENDED_ARG | Op::RESUME
+        ));
+        let value_head = head.map_or(false, |(op, arg)| {
+            matches!(op, Op::LOAD_FAST | Op::LOAD_FAST_LOAD_FAST | Op::LOAD_NAME
+                | Op::LOAD_DEREF | Op::LOAD_CLASSDEREF | Op::LOAD_GLOBAL
+                | Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::LOAD_COMMON_CONSTANT)
+                || (*arg == 0 && matches!(op,
+                    Op::BUILD_TUPLE | Op::BUILD_LIST | Op::BUILD_SET | Op::BUILD_MAP))
+        });
+        if !value_head {
+            return None;
+        }
         // require a NON-DEGENERATE tail: at least one value op before
         // the RETURN. A lone RETURN_VALUE (the clause's value was
         // loaded+SWAPed UNDER the POP_EXCEPT, _collections_abc 3.12

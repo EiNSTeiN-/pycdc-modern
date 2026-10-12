@@ -17,11 +17,18 @@ CPython 3.14 constructs encountered during static source recovery:
   being mistaken for filters.
 - Large dictionary displays inside comprehensions keep their own `MAP_ADD 1`
   operations.
-- None-led rejection guards preserve all missing-value exits, negated chained
-  comparisons, and shared continue/return blocks. Chained middle expressions
+- Shared rejection guards preserve missing-value and ordinary truth tests,
+  negated chained comparisons, and shared continue/return blocks. Rejections
+  can construct results with positional/keyword arguments. Guard generators
+  reuse the main parser and retain lexical captures and lazy consumption.
+  Chained middle expressions
   are evaluated once, and NaN comparisons retain their original polarity.
   Extending an accumulated comparison chain retains every earlier operand;
   distinct calls in explicitly separate comparisons remain distinct.
+- Exception-return tail matching requires a genuine independent value head.
+  Masked padding is never treated as a value-building tail or used to swallow
+  a later success response. Owned fixtures cover padded sequential handlers
+  and a genuine sunk value tail with an `else` path.
 - Compiler StopIteration routes remain frame machinery when bounding lexical
   handler chains. Shared continuations after handled exceptions stay outside
   those chains, preserving later generator expressions and sequential work.
