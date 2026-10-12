@@ -260,9 +260,16 @@ before deciding whether the handler ends in a return; real jumps and handler
 boundaries remain significant. Owned async fixtures cover successful saves,
 custom failures, ordinary failures, and cancellation with 1, 3, and 9 NOPs.
 
-Within a PEP 709 inline comprehension, target stores consume the modeled inner
-iterator. The following VM iterator cleanup must not consume the accumulator.
-The decoder suppresses that cleanup only at an inner END_FOR in an active
-comprehension. Four- and six-target list/set/dict fixtures retain both exact
-bytecode and exception tables, saved target variables, ordinary loops afterward,
-and errors during iteration/unpacking. No general POP_ITER suppression is used.
+Within a PEP 709 inline comprehension, reconstructing an unpacked target
+consumes its modeled iterator. The decoder restores that slot after completing
+the target, matching the simple-target path. VM iterator cleanup can then run
+normally without discarding the accumulator. Four- and six-target list/set/dict
+fixtures retain exact bytecode and exception tables, saved target variables,
+ordinary loops afterward, and iteration/unpacking errors. Mixed simple/unpacked
+target fixtures cover the counterexample to blanket inner cleanup suppression.
+
+The first 0.6.14 corpus trial gained 97 units but lost five previous matches.
+Its blanket inner-cleanup suppression was rejected at the retention gate, even
+though its initial owned tests and CI passed. The 0.6.15 correction models the
+missing iterator instead. Never publish a recovered-source checkpoint based
+only on net gains or successful tests; require set-wise retention as well.

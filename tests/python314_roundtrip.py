@@ -516,6 +516,23 @@ class Python314RoundTrip(unittest.TestCase):
                     self.assertEqual(outputs[1], outputs[0])
             self.assertEqual(recovered(data)[1:], ((10, 20, 30, 40, 50, 60), 6))
 
+    def test_simple_and_mixed_comprehension_targets_keep_real_iterator_cleanup(self):
+        cases = (
+            ('[(a, c) for a in data for c in a]', [[1, 2], [3]]),
+            ('[(a, c) for key, a in data for c in a]', [(0, [1, 2]), (1, [3])]),
+            ('[(a, c) for a in data for key, c in a]', [[(0, 1), (1, 2)]]),
+            ('[(a, c, e) for a, b in data for c, d in b for e in d]', [(1, [(2, [3, 4])])]),
+            ('{(a, c) for a in data for c in a}', [(1, 2), (3,)]),
+        )
+        for expression, data in cases:
+            source = f'def select(data):\n    return {expression}\n'
+            original, recovered = self.recover(source)
+            with self.subTest(expression=expression):
+                self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+                self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                self.assertEqual(recovered(data), original(data))
+                self.assertEqual(recovered([]), original([]))
+
     def test_padded_try_return_consumes_its_existing_calculated_value(self):
         import types
         expressions = ('make(value)', 'make(value).result',

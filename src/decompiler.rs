@@ -16815,16 +16815,6 @@ impl<'a> Ctx<'a> {
                         self.pop();
                     }
                     if inst.offset < end {
-                        // The inline target stores already consumed this
-                        // inner iterator in our expression stack. CPython's
-                        // separate iterator slot still needs POP_ITER (or
-                        // POP_TOP) cleanup; applying it here would discard
-                        // the comprehension accumulator instead.
-                        if popiter_follows && self.version.at_least(3, 13) {
-                            if let Some(&ci) = self.idx_of.get(&inst.offset) {
-                                self.skip_until = Some(self.instrs[ci + 1].end());
-                            }
-                        }
                         return true; // inner loop cleanup
                     }
                     self.finish_inline_comp();
@@ -43820,6 +43810,12 @@ impl<'a> Ctx<'a> {
                     cur.target = Some(target);
                 }
                 comp.target_seen = true;
+                // UNPACK_SEQUENCE consumed the modeled iterator while
+                // collecting its tuple target. The VM keeps a distinct
+                // iterator slot until END_FOR/POP_ITER. Restore that slot,
+                // as the simple-target path already does, instead of
+                // suppressing cleanup for generators that still own one.
+                self.push(value);
                 return;
             }
         }
