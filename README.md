@@ -352,3 +352,19 @@ instructions and exception tables for list, scalar and mapping returns, with
 126 paired normal, rejected-row, body-error, entry/exit-error, suppression and
 cancellation cases. A complete application retention gate remains required
 before promoting this development version.
+
+The `open-context-return-01` audit passed that gate: 13,824/14,291 application
+units match, with three gains and no losses in either raw or composite views.
+Version 0.6.20 is now stable. All 274 modules were independently audited;
+identical native output and diagnostics allowed 269 unchanged source-generation
+inputs to be reused with the frozen source API, while five were regenerated.
+
+Version 0.6.21 development distinguishes real inline-comprehension accumulators
+from empty containers consumed as call defaults. Modern accumulator setup must
+be followed by the compiler's `SWAP 2`; a preceding `row.get("values", {})`
+does not create a nested comprehension level. Legacy setup keeps its separate
+handling. Nine owned list/set/mapping and nested-comprehension fixtures compare
+exact instruction and exception bytes and 45 paired normal/error cases, including
+preserved outer locals and genuine empty/default-free iterable controls. The
+Python 3.14 suite now contains 52 methods. Full application retention remains
+required before advancing this version to the stable branch.

@@ -62,6 +62,38 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_empty_default_arguments_are_not_comprehension_accumulators(self):
+        expressions = (
+            '{field for row in rows for field in row.get("values", {})}',
+            '[field for row in rows for field in row.get("values", [])]',
+            '{field: len(field) for row in rows for field in row.get("values", {})}',
+            '[[field for field in row.get("values", [])] for row in rows]',
+            '[{field for field in row.get("values", {})} for row in rows]',
+            '[{field: len(field) for field in row.get("values", {})} for row in rows]',
+            '{field for row in rows for field in row["values"]}',
+            '{field for row in rows for field in row.get("values")}',
+            '{field for row in rows for field in row.get("values", ())}',
+        )
+        for expression in expressions:
+            original, recovered = self.recover(
+                'def select(rows):\n    row = "saved-row"\n    field = "saved-field"\n'
+                '    result = ' + expression + '\n    return result, row, field\n')
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for rows in ([], [{}], [{"values": ["a", "bb"]}, {"values": {"c": 1}}],
+                         [{"values": None}], [None]):
+                outcomes = []
+                for function in (original, recovered):
+                    try:
+                        result = ('return', function(rows))
+                    except (KeyError, TypeError, AttributeError) as error:
+                        result = (type(error).__name__, str(error))
+                    outcomes.append(result)
+                with self.subTest(expression=expression, rows=rows):
+                    self.assertEqual(outcomes[1], outcomes[0])
+                    if outcomes[1][0] == 'return':
+                        self.assertEqual(outcomes[1][1][1:], ('saved-row', 'saved-field'))
+
     def test_computed_context_returns_after_handler_loops_keep_cleanup(self):
         for asynchronous in (False, True):
             for returned in ('result', 'len(result)', '{"rows": result}'):
