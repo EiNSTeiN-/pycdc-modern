@@ -107,6 +107,26 @@ fn py310_basics() {
 }
 
 #[test]
+fn assignment_identity() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("assignment_identity.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "def separate(read):\n    left, right = read(), read()\n    return left, right",
+                "def shared(read):\n    left = right = read()\n    return left, right",
+                "def separate_none():\n    left, right = None, None\n    return left, right",
+                "def shared_none():\n    right = left = None\n    return left, right",
+            ],
+            &fixture,
+        );
+        assert_eq!(src.matches("read()").count(), 3, "{fixture}:\n{src}");
+    }
+}
+
+#[test]
 fn py311_comprehensions() {
     let (src, clean) = decompile_fixture("comprehensions.3.11.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
