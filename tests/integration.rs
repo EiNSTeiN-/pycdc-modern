@@ -169,3 +169,27 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn large_dictionary_displays_remain_comprehension_elements() {
+    // CPython 3.10 starts using MAP_ADD 1 for large displays. Before 3.12,
+    // list comprehensions also use the separate code-object walker.
+    for version in ["3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(
+            &format!("comprehension_dictionary_displays.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for size in [17, 20] {
+            let fields = (0..size).map(|index| format!("'k{index}': row + {index}"))
+                .collect::<Vec<_>>().join(", ");
+            for (name, open, close) in [("list", "[", "]"), ("generator", "(", ")")] {
+                let expected = format!(
+                    "def {name}{size}(rows):\n    return {open}{{{fields}}} for row in rows{close}");
+                assert_contains(&src, &[&expected], version);
+            }
+        }
+        assert_contains(&src, &[
+            "def dictionary_comprehension(rows):\n    return {row: row + 1 for row in rows}",
+            "def small_display(rows):\n    return [{'value': row} for row in rows]",
+        ], version);
+    }
+}

@@ -14797,6 +14797,7 @@ impl<'a> Ctx<'a> {
             | Op::COPY_DICT_WITHOUT_KEYS => {
                 if self.inline_comp.is_some()
                     && matches!(inst.op, Op::LIST_APPEND | Op::SET_ADD | Op::MAP_ADD)
+                    && (!self.version.at_least(3, 10) || arg >= 2)
                 {
                     self.comp_add_element(inst);
                 } else {
@@ -51833,8 +51834,19 @@ fn genexpr_ternary_merge(
                         let v = stack.pop().unwrap_or_else(|| Rc::new(Expr::Name("?".to_string())));
                         (k, v)
                     };
-                    key.get_or_insert(k);
-                    elt.get_or_insert(v);
+                    if self.version.at_least(3, 10) && inst.arg == 1 {
+                        // Large dict displays use MAP_ADD 1 even inside a
+                        // comprehension. They build its element, rather
+                        // than setting the enclosing comprehension's key.
+                        let dictionary = stack.pop()?;
+                        let Expr::Dict(entries) = &*dictionary else { return None; };
+                        let mut entries = entries.clone();
+                        entries.push((k, v));
+                        stack.push(Rc::new(Expr::Dict(entries)));
+                    } else {
+                        key.get_or_insert(k);
+                        elt.get_or_insert(v);
+                    }
                 }
                 Op::YIELD_VALUE => {
                     if let Some(p) = pending_or_filter.take() {
