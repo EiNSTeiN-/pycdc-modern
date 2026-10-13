@@ -169,3 +169,40 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn unpacked_targets_keep_iterator_cleanup_and_saved_locals() {
+    // PEP 709 inlining starts in 3.12; retain the 3.11 compatibility case.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("unpacked_comprehension_cleanup.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for (name, expression) in [
+            ("unpack4", "[a + b + c + d for rows in groups for a, b, c, d in rows]"),
+            ("unpack_list", "[(a, c) for a, b in groups for c, d in b]"),
+            ("unpack_set", "{(a, c) for a, b in groups for c, d in b}"),
+            ("unpack_dict", "{a: c for a, b in groups for c, d in b}"),
+            ("unpack6", "[(a, c, e) for a, b in groups for c, d in b for e, f in d]"),
+            ("simple", "[(a, c) for a in groups for c in a]"),
+            ("mixed", "[(a, c) for key, a in groups for c in a]"),
+            ("mixed_inner", "[(a, c) for a in groups for key, c in a]"),
+        ] {
+            let expected = format!(
+                "def {name}(groups):\n    a, b, c, d, e, f = 10, 20, 30, 40, 50, 60\n    result = {expression}\n    after = 0\n    for number in (1, 2, 3):\n        after += number\n    return result, (a, b, c, d, e, f), after");
+            assert_contains(&src, &[&expected], version);
+        }
+    }
+}
+
+#[test]
+fn padded_handler_returns_keep_false_before_the_success_tail() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        for padding in [1, 3, 9] {
+            let (src, clean) = decompile_fixture(
+                &format!("handler_return_padding_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, {padding} NOPs: incomplete:\n{src}");
+            assert_contains(&src, &[
+                "async def handled(read, log):\n    try:\n        await read()\n        log('saved')\n    except ValueError:\n        log('locked')\n        return False\n    except Exception as error:\n        log('failed', error)\n        return False\n    return True",
+            ], version);
+        }
+    }
+}

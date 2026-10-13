@@ -7540,6 +7540,12 @@ impl<'a> Ctx<'a> {
         while k2 < self.instrs.len() {
             let c = &self.instrs[k2];
             match c.op {
+                Op::NOP | Op::NOT_TAKEN | Op::CACHE => {
+                    // Padding does not end the post-POP_EXCEPT return
+                    // trailer. Keep scanning through it so an unnamed
+                    // handler retains its already loaded return value.
+                    k2 += 1;
+                }
                 Op::LOAD_CONST | Op::STORE_FAST | Op::STORE_NAME
                 | Op::DELETE_FAST | Op::DELETE_NAME | Op::STORE_DEREF
                 | Op::DELETE_DEREF => {
@@ -43236,6 +43242,12 @@ impl<'a> Ctx<'a> {
                     cur.target = Some(target);
                 }
                 comp.target_seen = true;
+                // UNPACK_SEQUENCE consumed the modeled iterator while
+                // collecting its tuple target. The VM keeps a distinct
+                // iterator slot until END_FOR/POP_ITER. Restore that slot,
+                // as the simple-target path already does, instead of
+                // suppressing cleanup for generators that still own one.
+                self.push(value);
                 return;
             }
         }
