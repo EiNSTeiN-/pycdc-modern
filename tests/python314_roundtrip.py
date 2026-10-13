@@ -62,6 +62,103 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def async_exit_outcome(self, function, fault, suppression, count=1, ready=False):
+        class Owner:
+            active = False
+            def __init__(self):
+                self.events = []
+                self.ready = ready
+            async def __aenter__(self):
+                self.events.append('outer-enter')
+                if fault == 'outer-enter':
+                    raise ValueError('owned outer enter')
+                self.active = True
+                return self
+            async def __aexit__(self, kind, value, trace):
+                self.events.append(('outer-exit', None if kind is None else kind.__name__))
+                self.active = False
+                if fault == 'outer-exit':
+                    raise ValueError('owned outer exit')
+                return suppression == 'outer'
+            def query(self, name):
+                self.events.append(('query', name))
+                return Query(self, name)
+            def build(self, first, last):
+                self.events.append(('build', self.active, first, last))
+                if fault == 'build':
+                    raise ValueError('owned build')
+                if fault == 'build-cancel':
+                    raise asyncio.CancelledError('owned build cancellation')
+                return first + last
+            async def user(self, *values):
+                self.events.append(('user', self.active, values))
+                if fault == 'read':
+                    raise ValueError('owned user')
+                if fault == 'read-cancel':
+                    raise asyncio.CancelledError('owned user cancellation')
+            async def write(self, first, last):
+                await self.user(first, last)
+        class Query:
+            def __init__(self, owner, name):
+                self.owner, self.name = owner, name
+                self.selected = name == f'row{count // 2}'
+            async def __aenter__(self):
+                self.owner.events.append(('query-enter', self.name, self.owner.active))
+                if self.selected and fault == 'query-enter':
+                    raise ValueError('owned query enter')
+                return self
+            async def read(self):
+                self.owner.events.append(('read', self.name, self.owner.active))
+                if self.selected and fault == 'read':
+                    raise ValueError('owned read')
+                if self.selected and fault == 'read-cancel':
+                    raise asyncio.CancelledError('owned read cancellation')
+                return int(self.name[3:])
+            async def __aexit__(self, kind, value, trace):
+                self.owner.events.append(('query-exit', self.name,
+                    None if kind is None else kind.__name__, self.owner.active))
+                if self.selected and fault == 'query-exit':
+                    raise ValueError('owned query exit')
+                return suppression == 'query'
+        owner = Owner()
+        try:
+            result = ('return', asyncio.run(function(owner)))
+        except BaseException as error:
+            result = ('error', type(error).__name__, str(error))
+        return result, owner.events, owner.active
+
+    def check_async_exit_source(self, source, count=1, ready=False):
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        for fault in ('', 'outer-enter', 'outer-exit', 'query-enter', 'query-exit',
+                      'read', 'read-cancel', 'build', 'build-cancel'):
+            for suppression in ('', 'outer', 'query'):
+                with self.subTest(fault=fault, suppression=suppression, count=count, ready=ready):
+                    self.assertEqual(self.async_exit_outcome(original, fault, suppression, count, ready),
+                                     self.async_exit_outcome(recovered, fault, suppression, count, ready))
+
+    def test_async_success_exit_closes_only_its_outer_context(self):
+        for count in (1, 2, 4, 8):
+            source = 'async def select(owner):\n    async with owner:\n'
+            for index in range(count):
+                source += (f'        async with owner.query("row{index}") as query:\n'
+                           f'            row{index} = await query.read()\n')
+            source += (f'    value = owner.build(row0, row{count - 1})\n'
+                       '    return {"value": value, "active": owner.active}\n')
+            self.check_async_exit_source(source, count)
+
+    def test_async_success_exit_preserves_user_await_and_branch_return(self):
+        source = ('async def select(owner):\n    async with owner:\n'
+                  '        await owner.user(None, None, None)\n'
+                  '        return owner.build(1, 2)\n')
+        self.check_async_exit_source(source)
+        source = ('async def select(owner):\n    async with owner:\n'
+                  '        if owner.ready:\n            return 4\n'
+                  '        await owner.write(1, 2)\n    return 2\n')
+        for ready in (False, True):
+            self.check_async_exit_source(source, ready=ready)
+
     PRIVATE_CLAUSE_SOURCE = '''async def select(owner):
     accepted = False
     for candidate in owner.candidates:

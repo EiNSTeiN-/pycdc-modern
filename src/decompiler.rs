@@ -11350,7 +11350,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// 3.12+ inline with success-exit span: `LOAD None; LOAD None;
-    /// LOAD None; CALL; POP_TOP` starting at `off` — returns the offset
+    /// LOAD None; CALL; [async exit await;] POP_TOP` starting at `off` — returns the offset
     /// just past the POP_TOP. The callable is the VM-managed bound
     /// __exit__ (never modeled); the sequence is pure machinery.
     fn inline_with_exit_span(&self, off: usize) -> Option<usize> {
@@ -11393,6 +11393,45 @@ impl<'a> Ctx<'a> {
         k += 1;
         while matches!(self.instrs.get(k).map(|x| x.op), Some(op) if matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)) {
             k += 1;
+        }
+        if self.instrs.get(k).map(|x| (x.op, x.arg)) == Some((Op::GET_AWAITABLE, 2)) {
+            // The compiler marks an __aexit__ await with operand 2. A
+            // user-authored await uses operand 0 and must remain visible.
+            // Consume only a complete SEND loop ending in END_SEND.
+            k += 1;
+            let none = self.instrs.get(k)?;
+            if none.op != Op::LOAD_CONST || !matches!(
+                self.code.consts.get(none.arg as usize).map(|o| &**o),
+                Some(PyObject::None))
+            {
+                return None;
+            }
+            k += 1;
+            let send = self.instrs.get(k)?;
+            if send.op != Op::SEND {
+                return None;
+            }
+            let end = *self.idx_of.get(&send.target?)?;
+            if end <= k || end - k > 12 || self.instrs[end].op != Op::END_SEND {
+                return None;
+            }
+            let loop_body = &self.instrs[k + 1..end];
+            if !loop_body.iter().any(|x| x.op == Op::YIELD_VALUE)
+                || !loop_body.iter().any(|x| {
+                    x.op == Op::JUMP_BACKWARD_NO_INTERRUPT && x.target == Some(send.offset)
+                })
+                || loop_body.iter().any(|x| {
+                    !matches!(x.op, Op::YIELD_VALUE | Op::RESUME | Op::CLEANUP_THROW
+                        | Op::JUMP_BACKWARD_NO_INTERRUPT | Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                        || (x.op == Op::JUMP_BACKWARD_NO_INTERRUPT && x.target != Some(send.offset))
+                })
+            {
+                return None;
+            }
+            k = end + 1;
+            while matches!(self.instrs.get(k).map(|x| x.op), Some(op) if matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)) {
+                k += 1;
+            }
         }
         if self.instrs.get(k).map(|x| x.op) != Some(Op::POP_TOP) {
             return None;

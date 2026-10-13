@@ -465,3 +465,18 @@ failure, no-close and terminal branches, cancellation, handler logging failure,
 and post-loop failure. All five fixture layouts match complete instruction and
 exception bytes; the full behavior suite passes 65 methods. Full corpus
 retention remains required before stable promotion or application claims.
+
+Version 0.6.27 development recognizes the complete normal async-context exit
+after the existing three-None/CALL protocol. GET_AWAITABLE must carry operand
+2; SEND must target END_SEND through only its suspension loop and cleanup.
+An ordinary user await carries operand 0 and cannot qualify. The existing
+handler ownership check closes the outer context at its own exit while keeping
+it open at inner query exits. No global context extent is widened.
+
+Two owned methods add 189 paired cases across one, two, four and eight nested
+sequential query contexts, genuine three-None user calls, and branch returns.
+They compare complete instruction and exception bytes and cover enter/read/
+exit/build faults, cancellation, inner and outer suppression, event order and
+whether the outer context is active when the returned payload is built. The
+full behavior suite passes 67 methods. The separate nested constant-return
+layout remains unproved. Full corpus retention is required before promotion.
