@@ -5,6 +5,7 @@ import marshal
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -12,6 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("PYCDC_BINARY", ROOT / "target/debug/pycdc"))
 
 
+@unittest.skipUnless(
+    sys.implementation.name == "cpython" and (3, 11) <= sys.version_info[:2] < (3, 15),
+    "requires CPython 3.11–3.14; 3.15 LOAD_COMMON_CONSTANT 7 (None) is not handled",
+)
 class RoundTrip(unittest.TestCase):
     def recover(self, source):
         code = compile(source, "fixture.py", "exec", dont_inherit=True)
