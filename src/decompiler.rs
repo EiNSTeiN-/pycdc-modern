@@ -8108,6 +8108,17 @@ impl<'a> Ctx<'a> {
         loop {
             let mut grew = false;
             for e in &self.raw_exc_entries {
+                // The generator/coroutine StopIteration handler spans the
+                // whole frame, not this source-level except/finally chain.
+                // Following its redirects would swallow later main-flow
+                // statements into the current handler region.
+                let frame_handler = self.idx_of.get(&e.target)
+                    .and_then(|&index| self.instrs.get(index))
+                    .map_or(false, |instruction| instruction.op == Op::CALL_INTRINSIC_1
+                            && instruction.arg == 3);
+                if frame_handler {
+                    continue;
+                }
                 let seed = e.start == from
                     || (e.target == from && e.start < from);
                 let inside = e.start >= from
