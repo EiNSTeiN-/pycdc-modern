@@ -52942,7 +52942,17 @@ impl<'a> Ctx<'a> {
                     continue
                 }
                 Op::BUILD_LIST | Op::BUILD_SET | Op::BUILD_MAP => {
-                    return ins.arg == 0;
+                    if ins.arg != 0 {
+                        return false;
+                    }
+                    // Modern accumulators are lifted under the iterator
+                    // by SWAP 2. An empty default argument consumed by a
+                    // preceding CALL is not a new comprehension level.
+                    // Preserve the distinct py2 prologue handled above.
+                    return !self.version.at_least(3, 12)
+                        || self.instrs.get(back + 1).map_or(false, |next| {
+                            next.op == Op::SWAP && next.arg == 2
+                        });
                 }
                 o if is_pure_value_op(o)
                     || matches!(
