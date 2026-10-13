@@ -169,3 +169,25 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn independent_lookup_guards_keep_assignment_and_return_inside_the_loop() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("loop_lookup_guards.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        // The existing None-jump printer uses either equivalent spelling.
+        let src = src.replace("not coordinator is not None", "coordinator is None");
+        assert_contains(
+            &src,
+            &[
+                "def rating_lookup(values):\n    for value in values:\n        if not value.rating < 10:\n            continue\n        coordinator = value.coordinator\n        if coordinator is None:\n            continue\n        return coordinator",
+                "def dictionary_lookup(rows):\n    for row in rows:\n        if not isinstance(row, dict):\n            continue\n        coordinator = row.get('coordinator')\n        if coordinator is None:\n            continue\n        return coordinator",
+                "def none_lookup(rows):\n    for row in rows:\n        if row is None:\n            continue\n        coordinator = row.coordinator\n        if coordinator is None:\n            continue\n        return coordinator",
+                "return [row.get('coordinator') for row in rows if isinstance(row, dict)]",
+            ],
+            &fixture,
+        );
+        assert!(!src.contains("value.rating >="), "{fixture}: comparison inverted");
+    }
+}

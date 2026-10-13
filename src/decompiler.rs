@@ -30799,6 +30799,100 @@ return None;
                 return;
             }
         }
+        // A 3.12+ lookup rejection guard has exactly one fall-through back
+        // edge before its success target. Preserve it as `if: continue` only
+        // when the success span assigns the local checked by an independent
+        // None guard and returned after that guard. Other suites retain their
+        // existing handling; changing protected suites also changes their
+        // exception-region boundaries.
+        // Treating the success region as an If suite bounded by the NEXT
+        // back edge closes that suite at an independent later guard and
+        // ejects the return that relies on its assignments (a coordinator
+        // lookup then returns an unbound local for non-dictionary rows).
+        // Inline comprehension filters retain their own bookkeeping. A
+        // nested while loop is not this for loop's rejection trampoline.
+        if self.version.at_least(3, 12) && self.inline_comp.is_none()
+            && self.code.exception_entries().is_empty()
+            && raw_target == target && target > self.cur_next
+        {
+            let current_loop = self.blocks.iter().rev()
+                .find(|block| matches!(block.kind, BlockType::For | BlockType::While))
+                .filter(|block| block.kind == BlockType::For)
+                .map(|block| (block.start, block.end));
+            let trampoline = self.idx_of.get(&self.cur_next).map(|&index| {
+                self.instrs[index..].iter().take_while(|item| item.offset < target)
+                    .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                    .collect::<Vec<_>>()
+            });
+            if let (Some((top, loop_end)), Some(steps)) = (current_loop, trampoline) {
+                let dependent_return = self.idx_of.get(&target).map_or(false, |&index| {
+                    let body = self.instrs[index..].iter().take_while(|item| item.offset < loop_end)
+                        .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                        .collect::<Vec<_>>();
+                    let guard = match body.iter().position(|item| item.target.is_some()
+                        || matches!(item.op, Op::RETURN_VALUE | Op::RETURN_CONST | Op::RAISE_VARARGS | Op::RERAISE)) {
+                        Some(index) => index, None => return false,
+                    };
+                    if guard < 2 || !matches!(body[guard].op, Op::POP_JUMP_IF_NONE | Op::POP_JUMP_IF_NOT_NONE) {
+                        return false;
+                    }
+                    let stored = body[..guard].iter().rev().find_map(|item| match item.op {
+                        Op::STORE_FAST => Some(item.arg),
+                        Op::STORE_FAST_LOAD_FAST => Some(item.arg >> 4),
+                        Op::STORE_FAST_STORE_FAST => Some(item.arg & 15),
+                        _ => None,
+                    });
+                    let local = match stored { Some(local) => local, None => return false };
+                    let tested = body[guard - 1];
+                    if !(matches!(tested.op, Op::LOAD_FAST | Op::LOAD_FAST_BORROW | Op::LOAD_FAST_CHECK)
+                            && tested.arg == local
+                        || tested.op == Op::STORE_FAST_LOAD_FAST && tested.arg & 15 == local) {
+                        return false;
+                    }
+                    let back = match body.get(guard + 1) { Some(back) => back, None => return false };
+                    if !matches!(back.op, Op::JUMP_BACKWARD | Op::JUMP_BACKWARD_NO_INTERRUPT)
+                        || back.target != Some(top) || body[guard].target != Some(back.end()) {
+                        return false;
+                    }
+                    let returned = match body.get(guard + 2) { Some(value) => value, None => return false };
+                    if !matches!(returned.op, Op::LOAD_FAST | Op::LOAD_FAST_BORROW | Op::LOAD_FAST_CHECK)
+                        || returned.arg != local { return false; }
+                    let mut tail = guard + 3;
+                    while tail + 1 < body.len() && body[tail].op == Op::SWAP
+                        && body[tail].arg == 2 && body[tail + 1].op == Op::POP_TOP {
+                        tail += 2;
+                    }
+                    body.get(tail).map_or(false, |item| item.op == Op::RETURN_VALUE)
+                });
+                if steps.len() == 1
+                    && dependent_return
+                    && matches!(steps[0].op, Op::JUMP_BACKWARD | Op::JUMP_BACKWARD_NO_INTERRUPT)
+                    && steps[0].target == Some(top) && steps[0].end() == target
+                {
+                    self.push_stmt(Stmt::If {
+                        // This layout negates a comparison guard by its jump, not
+                        // its operator. Folding `<` to `>=` changes NaN and
+                        // user comparison hooks. None-identity guards use
+                        // their dedicated jump spelling and can invert IS.
+                        cond: if jump_if_true {
+                            match &*cond {
+                                Expr::Compare { operands, ops }
+                                    if ops.len() == 1
+                                        && matches!(ops[0], CmpOp::Is | CmpOp::IsNot)
+                                        && operands.len() == 2
+                                        && operands.iter().any(|value| matches!(&**value,
+                                            Expr::Const(object) if matches!(&**object, PyObject::None))) =>
+                                { negate_cond(cond) }
+                                _ => simplify_not_or_wrap(cond),
+                            }
+                        } else { cond },
+                        body: vec![Stmt::Continue], orelse: Vec::new(),
+                    });
+                    self.skip_until = Some(target);
+                    return;
+                }
+            }
+        }
         if self.version.at_least(3, 12) {
             if let Some((merged, body_end, tramp_end)) =
                 self.try_or_join(&cond, jump_if_true, target)
