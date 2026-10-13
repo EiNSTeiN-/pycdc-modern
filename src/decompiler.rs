@@ -42238,6 +42238,7 @@ impl<'a> Ctx<'a> {
                     | Some(Op::STORE_DEREF)
                     | Some(Op::STORE_GLOBAL)
                     | Some(Op::STORE_FAST_MAYBE_NULL)
+                    | Some(Op::STORE_FAST_STORE_FAST)
             )
         };
         if is_store(self.instrs.get(ci + 1).map(|x| x.op)) {
