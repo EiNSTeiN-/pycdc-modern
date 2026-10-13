@@ -205,3 +205,47 @@ fn top_copy_and_identity_swap_are_valid() {
     assert_eq!(result.len(), 2);
     assert!(result.iter().all(|entry| Rc::ptr_eq(entry, &value)));
 }
+
+#[test]
+fn walrus_keeps_the_local_binding_and_one_evaluation() {
+    let mut module = fixture();
+    Rc::get_mut(&mut module.code).unwrap().varnames = vec!["state".into()];
+    let value = Rc::new(Expr::Call {
+        func: Rc::new(Expr::Name("get".into())),
+        args: vec![Rc::new(Expr::Name("entity_id".into()))],
+        keywords: Vec::new(), star_args: None, star_kwargs: None,
+    });
+    let outer = Rc::new(Expr::Name("outer".into()));
+    // Assignment expressions exist since 3.8; this COPY-backed encoding
+    // starts in 3.11. The bounded walker must preserve the binding in
+    // `(state := get(entity_id))` while retaining unrelated stack entries.
+    for minor in 11..=14 {
+        let version = PythonVersion { minor, ..module.version() };
+        let ctx = context(&module.code, version, vec![
+            instruction(Op::COPY, 1), instruction(Op::STORE_FAST, 0),
+        ]);
+        let result = ctx.sim_stack_region(0, 2, vec![outer.clone(), value.clone()])
+            .expect("COPY followed by STORE_FAST is an assignment expression");
+        assert_eq!(result.len(), 2);
+        assert!(Rc::ptr_eq(&result[0], &outer));
+        match &*result[1] {
+            Expr::Named { target, value: assigned } => {
+                assert!(matches!(&**target, Expr::Name(name) if name == "state"));
+                assert!(Rc::ptr_eq(assigned, &value));
+            }
+            other => panic!("expected a named expression, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn store_fast_rejects_separate_evaluations_and_standalone_assignments() {
+    let module = fixture();
+    let ctx = context(&module.code, module.version(),
+        vec![instruction(Op::STORE_FAST, 0)]);
+    let name = || Rc::new(Expr::Name("value".into()));
+    // Equal syntax does not prove that the VM copied a single evaluation.
+    for stack in [vec![], vec![name()], vec![name(), name()]] {
+        assert!(ctx.sim_stack_region(0, 1, stack).is_none());
+    }
+}
