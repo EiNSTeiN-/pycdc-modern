@@ -1,0 +1,24 @@
+name: Assignment Identity
+
+on:
+  pull_request:
+  push:
+    branches: [fix/assignment-evaluation-identity]
+
+permissions:
+  contents: read
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: cargo build --locked
+      - run: python tests/test_assignment_identity.py
