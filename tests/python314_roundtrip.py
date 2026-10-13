@@ -62,6 +62,170 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def nested_handler_outcome(self, function, case, asynchronous=False):
+        class Owner:
+            def __init__(self):
+                self.rows = [] if case == 'empty' else [1, 2, 3]
+                self.events = []
+                self.row = 2
+            def record(self, row):
+                self.events.append(('record', row))
+                if case == 'row-error' and row == 2:
+                    raise ValueError('owned row')
+                if case == 'key-error' and row == 2:
+                    raise KeyError('owned key')
+                if case == 'runtime-error':
+                    raise RuntimeError('owned runtime')
+                if case == 'cancel':
+                    raise asyncio.CancelledError('owned cancellation')
+            async def arecord(self, row):
+                self.record(row)
+            def second(self, row):
+                self.events.append(('second', row))
+                if case == 'key-error' and row == 2:
+                    raise KeyError('owned second')
+            async def asecond(self, row):
+                self.second(row)
+            def failed(self, row, *details):
+                self.events.append(('failed', row, details))
+                if case == 'handler-error':
+                    raise RuntimeError('owned handler')
+            def other(self, row, *details):
+                self.events.append(('other', row, details))
+            def finish(self):
+                self.events.append('finish')
+                if case == 'finish-error':
+                    raise RuntimeError('owned finish')
+            def fallback(self, *details):
+                self.events.append(('fallback', details))
+        owner = Owner()
+        try:
+            value = function(owner)
+            if asynchronous:
+                value = asyncio.run(value)
+            result = ('return', value)
+        except BaseException as error:
+            result = ('error', type(error).__name__, str(error))
+        return result, owner.events
+
+    def test_nested_loop_handlers_keep_every_row_and_outer_fault_scope(self):
+        variants = [(asynchronous, awaits, outer, post, False)
+            for asynchronous in (False, True)
+            for awaits in ((0, 1, 2) if asynchronous else (0,))
+            for outer in (False, True) for post in (False, True)]
+        variants += [(False, 0, True, True, True), (True, 1, True, True, True)]
+        for asynchronous, awaits, outer, post, pass_handler in variants:
+            lines = [('async ' if asynchronous else '') + 'def select(owner):']
+            if outer:
+                lines.append('    try:')
+            indent = '        ' if outer else '    '
+            lines.extend([indent + 'for row in owner.rows:', indent + '    try:',
+                indent + ('        await owner.arecord(row)' if awaits
+                          else '        owner.record(row)')])
+            if awaits == 2:
+                lines.append(indent + '        await owner.asecond(row)')
+            lines.extend([indent + '    except ValueError:',
+                indent + ('        pass' if pass_handler else '        owner.failed(row)')])
+            if post:
+                lines.append(indent + 'owner.finish()')
+            if outer:
+                lines.extend(['    except RuntimeError:', '        owner.fallback()'])
+            lines.append('    return None')
+            original, recovered = self.recover('\n'.join(lines) + '\n')
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for case in ('normal', 'empty', 'row-error', 'finish-error', 'runtime-error', 'cancel'):
+                self.assertEqual(self.nested_handler_outcome(original, case, asynchronous),
+                                 self.nested_handler_outcome(recovered, case, asynchronous))
+
+    def test_nested_loop_named_multiple_and_sibling_handler_bounds(self):
+        bodies = (
+            '''            try:
+                owner.record(row)
+            except ValueError as error:
+                owner.failed(row, str(error))
+''',
+            '''            try:
+                owner.record(row)
+            except ValueError as error:
+                owner.failed(row, str(error))
+            except KeyError as error:
+                owner.other(row, str(error))
+''',
+            '''            try:
+                owner.record(row)
+            except ValueError:
+                owner.failed(row)
+            try:
+                owner.second(row)
+            except KeyError:
+                owner.other(row)
+''',
+            '''            try:
+                owner.record(row)
+            except Exception:
+                owner.failed(row)
+''',
+        )
+        for index, body in enumerate(bodies):
+            outer = ('Exception' if index == 3 else 'RuntimeError')
+            source = ('def select(owner):\n    try:\n        for row in owner.rows:\n'
+                + body + '        owner.finish()\n'
+                + f'    except {outer} as error:\n        owner.fallback(str(error))\n'
+                + '    return None\n')
+            original, recovered = self.recover(source)
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for case in ('normal', 'empty', 'row-error', 'key-error',
+                         'handler-error', 'finish-error', 'runtime-error'):
+                self.assertEqual(self.nested_handler_outcome(original, case),
+                                 self.nested_handler_outcome(recovered, case))
+
+    def test_nonloop_siblings_and_outer_finally_keep_original_handler_ownership(self):
+        bodies = (
+            '''    try:
+        try:
+            owner.record(owner.row)
+        except ValueError:
+            owner.failed(owner.row)
+    except RuntimeError:
+        owner.fallback()
+''',
+            '''    try:
+        for row in owner.rows:
+            try:
+                owner.record(row)
+            except ValueError:
+                owner.failed(row)
+    finally:
+        owner.finish()
+''',
+            '''    try:
+        owner.record(owner.row)
+    except ValueError:
+        owner.failed(owner.row)
+    try:
+        owner.finish()
+    except RuntimeError:
+        owner.fallback()
+''',
+            '''    try:
+        try:
+            owner.record(owner.row)
+        except Exception:
+            owner.failed(owner.row)
+    except Exception:
+        owner.fallback()
+''',
+        )
+        for body in bodies:
+            original, recovered = self.recover('def select(owner):\n' + body + '    return None\n')
+            self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+            self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+            for case in ('normal', 'empty', 'row-error', 'runtime-error', 'finish-error'):
+                self.assertEqual(self.nested_handler_outcome(original, case),
+                                 self.nested_handler_outcome(recovered, case))
+
     def test_compound_boolean_calls_keep_one_argument_and_original_value_order(self):
         for expression in (
             'bool((optimization and reasons) or rows)',

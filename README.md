@@ -431,3 +431,21 @@ callbacks, and failure paths. Two methods cover 113 paired cases; the full
 Python behavior suite has 59 methods. Full corpus retention is still required
 before stable promotion or application coverage claims. No comparison rule
 is relaxed.
+
+Version 0.6.25 development preserves a nested try owned by an intervening
+live For. Relocated inner dispatch between the outer body and its handler
+does not justify rebuilding the inner try as a sibling of the loop. Record
+that lexical ownership when the inner block opens; keep its tail, suppress
+the outer flat split rebuild for that head, and parse its own clauses without
+adopting the outer dispatch. Parent-target POP_EXCEPT fragments do not truncate
+later clauses. Genuine sibling heads and private nested clause boundaries
+still constrain the scan. No-loop, sibling and outer-finally cases retain the
+previous algorithm. If/While/With-only boundaries and private nested clause
+families are not claimed fixed by this narrow change.
+
+Three owned regression methods add 156 paired normal, empty, row/handler/
+post-loop failure and cancellation cases across sync/async loops, zero/one/two
+awaits, named/multiple/same-type handlers and two sibling handlers per row.
+Complete instruction and exception bytes agree in all accepted fixtures;
+independent no-loop, sequential and outer-finally controls remain exact.
+The full 274-module raw/composite zero-loss gate is required before promotion.

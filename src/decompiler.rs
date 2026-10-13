@@ -572,6 +572,9 @@ struct Ctx<'a> {
     /// chains, rendering `if AttributeError:` garbage and skipping the
     /// outer body end so the outer tail never fired)
     nested_tail_defer: bool,
+    /// An intervening live For owns this nested try. Its out-of-line
+    /// handler must not adopt the outer dispatch or enter a flat rebuild.
+    lexical_loop_handlers: FastMap<usize, usize>,
     pending_try_handlers: Vec<Vec<ExceptHandler>>,
     pending_loop: Vec<(Option<ExprRef>, Option<ExprRef>, Option<ExprRef>, Vec<Stmt>, bool)>,
     pending_with: Vec<Vec<WithItem>>,
@@ -1223,6 +1226,7 @@ pub fn decompile_in_scope(
         sunk_pair_drop: None,
         sunk_while_lift: None,
         nested_tail_defer: false,
+        lexical_loop_handlers: FastMap::default(),
         pending_try_handlers: Vec::new(),
         pending_loop: Vec::new(),
         pending_with: Vec::new(),
@@ -3516,7 +3520,7 @@ impl<'a> Ctx<'a> {
                 // interact) and its skip_until strands the enclosing
                 // region's tail
                 if let Some(h) = tc.except_handler {
-                    if self.try_ctxs.values().any(|r| {
+                    if let Some(enclosing) = self.try_ctxs.values().filter(|r| {
                         r.start < tc.start
                             && r.region_end > tc.region_end
                             && r.finally_handler.is_none()
@@ -3524,8 +3528,20 @@ impl<'a> Ctx<'a> {
                             && r.except_handler.map_or(false, |ho| {
                                 h >= r.body_end && h < ho
                             })
-                    }) {
-                        self.nested_tail_defer = true;
+                    }).max_by_key(|r| r.start) {
+                        let intervening_for = self.blocks.iter().any(|b| {
+                            b.kind == BlockType::For
+                                && b.start > enclosing.start
+                                && b.start <= tc.start
+                                && b.end >= tc.region_end
+                        });
+                        if intervening_for {
+                            self.lexical_loop_handlers.insert(
+                                h, enclosing.except_handler.unwrap(),
+                            );
+                        } else {
+                            self.nested_tail_defer = true;
+                        }
                     }
                 }
                 let mut blk = Block::new(BlockType::Try, pos, tc.body_end);
@@ -4204,6 +4220,9 @@ impl<'a> Ctx<'a> {
                             && r.finally_handler.is_none()
                             && r.except_handler
                                 .map_or(false, |h| h >= tc.body_end && h < h_outer)
+                            && !r.except_handler.map_or(false, |h| {
+                                self.lexical_loop_handlers.contains_key(&h)
+                            })
                     })
                     .cloned();
                 if let Some(inner) = nested {
@@ -6616,8 +6635,8 @@ impl<'a> Ctx<'a> {
     fn parse_except_dispatch(&mut self, from: usize) -> Vec<ExceptHandler> {
         let mut handlers = Vec::new();
         let mut clause_offsets: Vec<usize> = Vec::new();
-        let end = self.dispatch_region_end(from);
         let region_end = self.handler_region_end(from);
+        let end = self.dispatch_region_end(from);
         // nesting: this chain's own cleanup region ends exactly where the
         // next chain begins — that chain handles re-raises FROM this one,
         // i.e. it is the ENCLOSING try's dispatch. Adjacency must be exact
@@ -6689,6 +6708,7 @@ impl<'a> Ctx<'a> {
             None => false,
         };
         let nested = region_end > from && adj_reraise && (extent == region_end || tramp_gap)
+            && !self.lexical_loop_handlers.contains_key(&from)
             // the exception table must confirm the enclosure: a chain
             // genuinely nested inside the adjacent one has (part of) its
             // own region protected by an entry targeting the adjacent
@@ -8512,6 +8532,12 @@ impl<'a> Ctx<'a> {
     fn dispatch_region_end(&self, from: usize) -> usize {
         let mut end = self.handler_region_end(from);
         for e in &self.exc_entries {
+            // A per-row clause's POP_EXCEPT can be protected by the
+            // enclosing dispatch. It does not introduce a nested clause
+            // body. All other genuine nested-chain bounds remain active.
+            if self.lexical_loop_handlers.get(&from) == Some(&e.target) {
+                continue;
+            }
             if e.start > from && e.start < end && e.target > from {
                 // only a NESTED chain head bounds the region — an
                 // except* clause body's lasti redirect targets in-chain
