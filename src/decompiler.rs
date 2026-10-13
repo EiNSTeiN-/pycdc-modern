@@ -19314,20 +19314,10 @@ let reopen = self
                     return true;
                 }
                 let target = inst.target.unwrap_or(inst.end());
-                // async for: the iterable expression is an Await, or we are
-                // inside an async def using GET_AITER
-                let is_async = matches!(
-                    self.stack.last(),
-                    Some(Sv::E(e)) if matches!(&**e, Expr::Await(_))
-                );
-                if is_async {
-                    if let Some(Sv::E(e)) = self.stack.last_mut() {
-                        if let Expr::Await(inner) = &**e {
-                            *e = inner.clone();
-                        }
-                    }
-                }
-                self.handle_for_iter(target, is_async);
+                // FOR_ITER iterates synchronously, even when the collection
+                // was produced by `await fetch()`. Genuine async iteration
+                // uses GET_AITER/GET_ANEXT and its separate decoder path.
+                self.handle_for_iter(target, false);
                 true
             }
             Op::FOR_LOOP => {

@@ -169,3 +169,28 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn awaited_collections_use_synchronous_iteration() {
+    for version in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("awaited_synchronous_iteration.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"async def awaited(read):
+    result = []
+    for item in await read():
+        result.append(item)
+    return result"#,
+            r#"async def asynchronous(read):
+    result = []
+    async for item in read():
+        result.append(item)
+    return result"#,
+            r#"async def sync(read):
+    result = []
+    for item in read():
+        result.append(item)
+    return result"#,
+        ], version);
+    }
+}
