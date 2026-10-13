@@ -183,3 +183,31 @@ fn extended_loop_prefix_preserves_handler_continue() {
         }
     }
 }
+
+#[test]
+fn conditional_loop_prefix_keeps_both_arms_inside_loop() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("conditional_loop_prefix.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        let args = "row.ok, row.a, row.b, row.c, row.d, row.e, row.f, row.g, row.h, row.i, row.j, row.k, row.l";
+        let file_condition = if version == "3.12" { "" } else { "not " };
+        let directory_condition = if version == "3.11" { "elif not" } else { "if" };
+        assert_contains(
+            &src,
+            &[
+                &format!("    for row in rows:\n        if row.is_file:\n            if {file_condition}work('file', {args}):"),
+                &format!("        {directory_condition} work('directory', {args}):"),
+                "    return success",
+            ],
+            version,
+        );
+        assert!(!src.contains("\n    success = False"), "Python {version}: failure assignment escaped the loop:\n{src}");
+        if version == "3.13" || version == "3.14" {
+            assert_contains(
+                &src,
+                &["                success = False\n                continue\n            continue"],
+                version,
+            );
+        }
+    }
+}

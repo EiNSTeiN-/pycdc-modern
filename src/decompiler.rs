@@ -23192,10 +23192,9 @@ impl<'a> Ctx<'a> {
     fn is_loop_top_prefix(&self, t: usize, start: usize) -> bool {
         // 3.11+ folds inline CACHE entries into each instruction's size,
         // so offsets inside a cached instruction have no idx_of entry
-        // either - a back edge landing <=8 bytes before the loop top
-        // would falsely match a CACHE tail (compileall 3.13 main tore
-        // into an INCOMPLETE stub). Modern offsets therefore need proof from
-        // original bytes, rather than absence from the instruction map.
+        // either. Absence from the instruction map cannot distinguish
+        // a CACHE tail from an EXTENDED_ARG prefix: modern offsets need
+        // proof from the original bytes.
         if t >= start || start - t > 8 {
             return false;
         }
@@ -33234,6 +33233,10 @@ if split_cond {
                         // `if c: continue`-style: fall through to the
                         // arm below that opens an If ending at that back
                         // edge instead of closing the loop here.
+                        // A prefixed loop top has the same identity here
+                        // as when matching the conditional above. Otherwise
+                        // a later edge to EXTENDED_ARG is missed and a
+                        // conditional continue prematurely closes the loop.
                         let loop_start0 = self.blocks[i].start;
                         let has_later_back_edge = self
                             .idx_of
@@ -33241,7 +33244,10 @@ if split_cond {
                             .map_or(false, |&ci0| {
                                 self.instrs.iter().skip(ci0 + 1).any(|ins| {
                                     ins.is_backward
-                                        && ins.target == Some(loop_start0)
+                                        && ins.target.map_or(false, |t| {
+                                            t == loop_start0
+                                                || self.is_loop_top_prefix(t, loop_start0)
+                                        })
                                         && matches!(
                                             ins.op,
                                             Op::JUMP_ABSOLUTE
@@ -33421,8 +33427,21 @@ if split_cond {
                                     }
                                     return;
                                 }
+                                // A forward conditional can skip this back
+                                // edge and land on the next one. Keep the
+                                // skipped edge inside its fall-through arm;
+                                // ending before it moves `continue` outside
+                                // the guard and changes the recompiled jumps.
+                                let body_end = if self.version.at_least(3, 11)
+                                    && raw_target == inst.end()
+                                    && self.is_loop_top_prefix(target, loop_start)
+                                {
+                                    inst.end()
+                                } else {
+                                    inst.start
+                                };
                                 let mut blk =
-                                    Block::new(BlockType::If, self.cur_next, inst.start);
+                                    Block::new(BlockType::If, self.cur_next, body_end);
                                 let c = if jump_if_true {
                                     negate_cond(cond.clone())
                                 } else {
