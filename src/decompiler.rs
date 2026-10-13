@@ -28791,6 +28791,15 @@ return None;
         if st_t.len() != st_e.len() || st_t.is_empty() {
             return None;
         }
+        // CALL_KW support must not make an arm-local callable/argument
+        // prefix look like a preload from before the condition. Merging
+        // only its final slot would hoist that prefix across the truth
+        // test. Decline this shape until the whole arm can be preserved.
+        if st_t.len() != base.len() + 1
+            && self.instrs[tstart..=re].iter().any(|ins| ins.op == Op::CALL_KW)
+        {
+            return None;
+        }
         let slot_t = st_t.last()?.clone();
         let slot_e = st_e.last()?.clone();
         // compare the UNDER-stack only — the tops are the slot values
@@ -28917,9 +28926,17 @@ return None;
             (
                 Expr::Call { func: fa, args: aa, keywords: ka, star_args: sa, star_kwargs: ska },
                 Expr::Call { func: fb, args: ab, keywords: kb, star_args: sb, star_kwargs: skb },
-            ) if ka.is_empty() && kb.is_empty() && sa.is_none() && sb.is_none() && ska.is_none() && skb.is_none() && aa.len() == ab.len() => {
+            ) if sa.is_none() && sb.is_none() && ska.is_none() && skb.is_none()
+                && aa.len() == ab.len() && ka.len() == kb.len()
+                && ka.iter().zip(kb).all(|((a, _), (b, _))| a == b) => {
                 let mut slots: Vec<(&ExprRef, &ExprRef)> = vec![(fa, fb)];
                 for (x, y) in aa.iter().zip(ab.iter()) {
+                    slots.push((x, y));
+                }
+                // CALL_KW can now reach this merge through the bounded
+                // walker. Keep keyword values in the same ordered slot
+                // model as positional values, preserving the call itself.
+                for ((_, x), (_, y)) in ka.iter().zip(kb) {
                     slots.push((x, y));
                 }
                 let mut merged_idx: Option<usize> = None;
@@ -28940,8 +28957,9 @@ return None;
                 reps[idx] = val;
                 Some(Rc::new(Expr::Call {
                     func: reps[0].clone(),
-                    args: reps[1..].to_vec(),
-                    keywords: Vec::new(),
+                    args: reps[1..1 + aa.len()].to_vec(),
+                    keywords: ka.iter().zip(&reps[1 + aa.len()..])
+                        .map(|((name, _), value)| (name.clone(), value.clone())).collect(),
                     star_args: None,
                     star_kwargs: None,
                 }))
@@ -29109,6 +29127,28 @@ return None;
                         keywords: Vec::new(),
                         star_args: None,
                         star_kwargs: None,
+                    }));
+                }
+                Op::CALL_KW => {
+                    let names = st.pop()?;
+                    let Expr::Const(names) = &*names else { return None; };
+                    let PyObject::Tuple(names) = &**names else { return None; };
+                    let names: Option<Vec<String>> = names.iter().map(|value| match &**value {
+                        PyObject::Str(name) => Some(name.clone()), _ => None,
+                    }).collect();
+                    let names = names?;
+                    if names.len() > arg || st.len() < arg + 1 { return None; }
+                    let all = st.split_off(st.len() - arg);
+                    let positional = arg - names.len();
+                    let args = all[..positional].to_vec();
+                    let keywords = names.into_iter().zip(all[positional..].iter().cloned())
+                        .map(|(name, value)| (Some(name), value)).collect();
+                    let is_null = |value: &ExprRef| matches!(&**value, Expr::Name(name) if name == "\u{0}null");
+                    let mut callable = st.pop()?;
+                    if is_null(&callable) { callable = st.pop()?; }
+                    if st.last().map_or(false, is_null) { st.pop(); }
+                    st.push(Rc::new(Expr::Call {
+                        func: callable, args, keywords, star_args: None, star_kwargs: None,
                     }));
                 }
                 Op::BINARY_OP => {

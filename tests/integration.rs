@@ -169,3 +169,33 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn keyword_calls_survive_conditional_value_reconstruction() {
+    for version in ["3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("keyword_conditional_calls.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def case_0(value, build, other):
+    return build('reject' if value else 'accept', amount=0)"#,
+            r#"def case_1(value, build, other):
+    return build('prefix', amount=0 if value else 1)"#,
+            r#"def case_2(value, build, other):
+    return build(0 if value else 1, amount=value)"#,
+            r#"def case_9(value, build, other):
+    return build('prefix', amount=1 if value else 2, last=other(value))"#,
+            r#"def case_11(value, build, other):
+    return other(build(amount=1) if value else build(amount=2, other=3))"#,
+        ], version);
+    }
+}
+
+#[test]
+fn keyword_call_merge_does_not_hoist_an_arm_local_callable() {
+    for version in ["3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("keyword_call_arm_boundary.{version}.pyc"));
+        assert!(!clean, "Python {version}: an unproved call merge must remain incomplete:\n{src}");
+        assert!(!src.contains("owner.build(amount=1 if value else 2)"),
+            "Python {version}: callable resolution moved before the condition:\n{src}");
+    }
+}
