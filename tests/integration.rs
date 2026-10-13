@@ -169,3 +169,40 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn chained_comprehension_filters_keep_each_polarity() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("chained_comprehension_filters.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        for (kind, open, close, element) in [
+            ("list", "[", "]", "value"),
+            ("set", "{", "}", "value"),
+            ("dict", "{", "}", "value: value"),
+        ] {
+            for (polarity, negation) in [("positive", ""), ("negative", "not ")] {
+                for join in ["separate", "joined"] {
+                    let expected = format!(
+                        "def {kind}_{polarity}_{join}(values):\n    return {open}{element} for value in values if {negation}isinstance(value, str) if value{close}"
+                    );
+                    assert_contains(&src, &[&expected], &fixture);
+                }
+            }
+        }
+        assert_contains(
+            &src,
+            &[
+                "return [row.tag for row in rows if row.value == wanted if row.ready() if row.final()]",
+                "return [row.tag for row in rows if row.value != wanted if not row.ready() if row.final()]",
+            ],
+            &fixture,
+        );
+        let normalized = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_contains(
+            &normalized,
+            &["def broken_lines(values): return [value for value in values if isinstance(value, str) if value]"],
+            &fixture,
+        );
+    }
+}

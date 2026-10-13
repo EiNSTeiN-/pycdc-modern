@@ -31680,9 +31680,12 @@ return None;
                 comp.tern_chain_t = None;
                 // 3.12+ inline filters come in two layouts:
                 // - INVERTED (same-line 3.12; ALL of 3.13/3.14): the
-                //   jump lands ON the append (target is
-                //   LIST_APPEND/SET_ADD/MAP_ADD/YIELD after pads) and
-                //   the fall-through is the skip back edge. The jump
+                //   jump accepts this filter, either at the next filter
+                //   or the append, while fall-through skips the item.
+                //   Recognize the exact pad/back-edge span first: scanning
+                //   from the target can encounter a later filter's skip
+                //   before reaching the append and invert this filter.
+                //   The jump
                 //   polarity IS the filter polarity: PJT->`if C`,
                 //   PJF->`if not C`.
                 // - CLASSIC (3.12 line-broken filters): PJF->shared
@@ -31699,7 +31702,22 @@ return None;
                 // loop TOP, and scanning from there would wrap around
                 // and find the append after the filter again
                 // (_py_abc 3.12 __new__ line-broken setcomp)
-                let target_is_append = target > self.cur_offset
+                let fallthrough_skips_item = self.version.at_least(3, 12)
+                    && target > self.cur_offset
+                    && target < comp.end
+                    && self.idx_of.get(&self.cur_offset).zip(self.idx_of.get(&target))
+                        .map_or(false, |(&ci, &ti)| {
+                            if ti <= ci { return false; }
+                            let mut significant = self.instrs[ci + 1..ti].iter()
+                                .filter(|x| !matches!(x.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE));
+                            significant.next().map_or(false, |x| {
+                                x.is_backward
+                                    && matches!(x.op, Op::JUMP_BACKWARD | Op::JUMP_BACKWARD_NO_INTERRUPT
+                                                | Op::JUMP_ABSOLUTE | Op::JUMP)
+                                    && x.target == comp.for_iter_offsets.last().copied()
+                            }) && significant.next().is_none()
+                        });
+                let target_accepts_item = fallthrough_skips_item || (target > self.cur_offset
                     && self
                     .idx_of
                     .get(&target)
@@ -31734,8 +31752,8 @@ return None;
                                         | Op::YIELD_VALUE
                                 )
                             })
-                    });
-                let c = if target_is_append {
+                    }));
+                let c = if target_accepts_item {
                     if jump_if_true {
                         cond
                     } else {
@@ -31755,7 +31773,7 @@ return None;
                     cond
                 };
                 if let Some(cur) = &mut comp.cur {
-                    if comp_if_break && !target_is_append {
+                    if comp_if_break && !target_accepts_item {
                         cur.if_break = true;
                     }
                     cur.ifs.push(c);
