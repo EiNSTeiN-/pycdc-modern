@@ -31768,10 +31768,30 @@ return None;
         // elif test would create a nested If at the same target, so keep
         // the Else open in that case.
         if let Some(top) = self.blocks.last() {
+            // A modern Else opened immediately after the then arm's
+            // unconditional skip has an authoritative finite span. A guard
+            // inside that span can share its merge without ending the Else:
+            // closing it here ejects the guarded query result and may read
+            // its local on the other arm before assignment. Keep older and
+            // inferred/try-else boundaries on their existing path.
+            let guarded_else_merge = self.version.at_least(3, 11)
+                && top.kind == BlockType::Else
+                && self.cur_offset > top.start
+                && self.cur_offset < top.end
+                && self.idx_of.get(&top.start).map_or(false, |&si| {
+                    si > 0 && {
+                        let skip = &self.instrs[si - 1];
+                        !skip.is_backward
+                            && skip.end() == top.start
+                            && skip.target == Some(top.end)
+                            && matches!(skip.op, Op::JUMP_FORWARD | Op::JUMP | Op::JUMP_ABSOLUTE)
+                    }
+                });
             if matches!(top.kind, BlockType::Else | BlockType::TryElse)
                 && top.end == target
                 && !top.is_elif
                 && self.cur_offset != top.start
+                && !guarded_else_merge
             {
                 self.close_blocks_at(target);
             }

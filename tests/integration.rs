@@ -169,3 +169,68 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn finite_else_span_keeps_its_inner_guard() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("guarded_else_merge.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"async def awaited(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = 1
+    else:
+        row = await owner.fetch()
+        if row and row[0] is not None:
+            value = float(row[0])
+    owner.record(value)
+    return value"#,
+            r#"async def synchronous(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = float(1)
+    else:
+        row = owner.fetch()
+        if row and row[0] is not None:
+            value = 2
+    owner.record(value)
+    return value"#,
+            r#"async def attribute(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = float(active['total'])
+    else:
+        row = owner.row
+        if row and row[0] is not None:
+            value = float(row[0])
+    owner.record(value)
+    return value"#,
+            r#"async def following_else_work(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = 1
+    else:
+        row = await owner.fetch()
+        if row and row[0] is not None:
+            value = 2
+        owner.record('queried')
+    owner.record(value)
+    return value"#,
+            r#"async def independent(owner):
+    value = None
+    row = None
+    if owner.active:
+        value = 1
+    else:
+        row = await owner.fetch()
+    if row and row[0] is not None:
+        value = 2
+    return value"#,
+        ], version);
+    }
+}
