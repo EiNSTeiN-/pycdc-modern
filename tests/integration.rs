@@ -169,3 +169,24 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn nested_comprehensions_remain_generator_elements() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("nested_generator_comprehensions.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return tuple(({key: row[key] for key in row} for row in rows))",
+                "return tuple(([value * 2 for value in row] for row in rows))",
+                "return tuple(({value * 2 for value in row} for row in rows))",
+                "return tuple((collect([value * 2 for value in row]) for row in rows))",
+                "return tuple(({key: row[key] for key in row if key} for row in rows if row))",
+                "return tuple(({key: value for key, value in zip(columns, row) if key} for row in rows))",
+            ],
+            &fixture,
+        );
+    }
+}

@@ -50939,6 +50939,49 @@ impl<'a> Ctx<'a> {
 
 // =====================  comprehensions  =====================
 
+// The main statement parser already understands PEP 709's nested inline
+// comprehensions. Reuse it for generator elements instead of flattening an
+// inner dict/list/set comprehension into the generator's own clauses.
+fn generator_parts_from_body(
+    body: &[Stmt], generators: &mut Vec<Comprehension>,
+) -> Option<ExprRef> {
+    let mut result = None;
+    for statement in body {
+        match statement {
+            Stmt::For { target, iter, body, orelse, is_async } if orelse.is_empty() => {
+                if result.is_some() { return None; }
+                generators.push(Comprehension {
+                    target: target.clone(), iter: iter.clone(), ifs: Vec::new(),
+                    is_async: *is_async, if_line_break: false,
+                });
+                result = generator_parts_from_body(body, generators);
+                if result.is_none() { return None; }
+            }
+            Stmt::If { cond, body, orelse } if orelse.is_empty() => {
+                if result.is_some() { return None; }
+                generators.last_mut()?.ifs.push(cond.clone());
+                result = generator_parts_from_body(body, generators);
+                if result.is_none() { return None; }
+            }
+            Stmt::Expr(value) => {
+                match &**value {
+                    Expr::Yield(Some(value)) => {
+                        if result.is_some() { return None; }
+                        result = Some(value.clone());
+                    }
+                    Expr::Const(_) => {}, // Docstring.
+                    _ => return None,
+                }
+            }
+            Stmt::Pass | Stmt::Return(None) => {},
+            Stmt::Return(Some(value))
+                if matches!(&**value, Expr::Const(object) if matches!(&**object, PyObject::None)) => {},
+            _ => return None,
+        }
+    }
+    result
+}
+
 impl<'a> Ctx<'a> {
     /// Try to turn a completed call into a comprehension. The callee is a
     /// Function whose code object is named `<listcomp>` etc. The iterable is
@@ -51185,6 +51228,20 @@ fn genexpr_ternary_merge(
     ) -> Option<(ExprRef, Option<ExprRef>, Vec<Comprehension>)> {
         let table = table_for(self.version).ok()?;
         let instrs = crate::bytecode::decode_instructions(code, table, self.version);
+
+        if self.version.at_least(3, 12) && matches!(_kind, CompKind::Generator)
+            && instrs.iter().any(|instruction| instruction.op == Op::LOAD_FAST_AND_CLEAR)
+        {
+            if let Some(statements) = decompile(code, self.version).ok().filter(|result| result.clean) {
+                let mut generators = Vec::new();
+                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
+                    if !generators.is_empty() {
+                        generators[0].iter = outer_iter.clone();
+                        return Some((element, None, generators));
+                    }
+                }
+            }
+        }
 
         struct PartialGen {
             target: Option<ExprRef>,
@@ -53094,5 +53151,68 @@ impl<'a> Ctx<'a> {
                 self.push(expr);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod generator_parts_tests {
+    use super::*;
+
+    fn yielded_loop() -> Stmt {
+        Stmt::For {
+            target: Rc::new(Expr::Name("row".into())),
+            iter: Rc::new(Expr::Name("rows".into())),
+            body: vec![Stmt::Expr(Rc::new(Expr::Yield(Some(Rc::new(
+                Expr::Name("row".into()),
+            )))))],
+            orelse: vec![],
+            is_async: false,
+        }
+    }
+
+    #[test]
+    fn extraction_preserves_one_yield_path_and_rejects_siblings() {
+        let body = vec![yielded_loop()];
+        let mut generators = Vec::new();
+        let element = generator_parts_from_body(&body, &mut generators).unwrap();
+        assert!(matches!(&*element, Expr::Name(name) if name == "row"));
+        assert_eq!(generators.len(), 1);
+
+        let mut generators = Vec::new();
+        assert!(generator_parts_from_body(
+            &[yielded_loop(), yielded_loop()], &mut generators,
+        ).is_none());
+
+        let branch = Stmt::If {
+            cond: Rc::new(Expr::Name("ready".into())),
+            body: vec![Stmt::Expr(Rc::new(Expr::Yield(Some(Rc::new(
+                Expr::Name("row".into()),
+            )))))],
+            orelse: vec![],
+        };
+        let mut body = yielded_loop();
+        if let Stmt::For { body, .. } = &mut body {
+            *body = vec![branch.clone(), branch];
+        }
+        assert!(generator_parts_from_body(&[body], &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn extraction_does_not_discard_assignments_or_loop_else() {
+        for name in ["saved", "__assert_armored__"] {
+            let assignment = Stmt::Assign {
+                targets: vec![Rc::new(Expr::Name(name.into()))],
+                value: Rc::new(Expr::Const(Rc::new(PyObject::None))),
+                wrap_before: vec![],
+            };
+            assert!(generator_parts_from_body(
+                &[assignment, yielded_loop()], &mut Vec::new(),
+            ).is_none());
+        }
+        let mut body = yielded_loop();
+        if let Stmt::For { orelse, .. } = &mut body {
+            *orelse = vec![Stmt::Pass];
+        }
+        assert!(generator_parts_from_body(&[body], &mut Vec::new()).is_none());
     }
 }

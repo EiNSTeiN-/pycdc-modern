@@ -143,57 +143,28 @@ rendering bugs:
   (300+ regression-driven special cases), so it is left documented
   rather than patched blind.
 
-### Nested comprehension inside a genexp (3 modules, deliberately not patched)
+### Nested comprehensions inside generator expressions
 
-`({c: v for c, v in zip(cols, row) if c} for row in rows)` — a genexp whose
-*element* (or a call argument inside it) is an inlined (PEP 709) dict
-comprehension. The genexp keeps its own code object and is decompiled by
-the comprehension walker, which has no notion of a nested level: the
-inner `BUILD_MAP 0` accumulator lands on the walker's stack, `SWAP` is
-not modeled, and the following `FOR_ITER` treats it as a second `for`
-clause (`... for c, v in {}`), so the output does not parse.
+Python 3.12+ generators containing an inlined list, set or dictionary
+comprehension now reuse the statement parser to recover the nested element.
+This fixes whole-element and call-argument shapes, including the former
+minimal reproduction:
 
-A frame-stack prototype (one frame per comprehension level, `SWAP`
-modeled, the accumulator placeholder replaced by Rc identity when a level
-ends, `pending_or_filter` flushed per level) was implemented **twice** and
-reverted both times. What it achieved, verified by runtime-equivalence
-checks against the original sources: the whole-element shape and the
-call-argument shapes *as minimal repros* became semantically correct
-(`({c: v for c, v in zip(cols, t) if c} for t in rows)`,
-`(f(**d) for x in xs)`, `(f(x, y=1) for x in xs)`; the last two were
-fixed for real and are committed).
+```python
+({c: v for c, v in zip(cols, row) if c} for row in rows)
+```
 
-It still produced *plausible but semantically wrong* output for the three
-real modules (`pandas/core/methods/to_dict.py`,
-`sklearn/linear_model/_logistic.py`, `metrics/pairwise.py`), e.g.
+The extractor accepts a completely recovered For/If/yield tree, preserves
+its yielded expression, and restores the actual outer iterable at the call
+site. It rejects unsupported statements and multiple sibling yield paths.
+The legacy comprehension walker remains the fallback when extraction does
+not prove that shape, and for generators without an inlined comprehension.
 
-    fd(func, ret, s, X, Y[s, ...], **{k: (v[s] if k == "Y" else v) for k, v in kwds.items()})
-    ->  (fd if k == 'Y' else (func, ret, s, X, Y[s, ...])(*{}, **{**k}) for s in ...)
-
-The blocker is not the nesting itself: the walker's stack model is a
-heuristic that happens to agree with the VM on the shapes the corpus
-exercises, and a nested level exposes several concrete divergences at
-once (all observed with probes during the third attempt, 2026-09-15):
-
-  * `GET_ITER` is a no-op, so the 3.12 prologue's `SWAP`s reorder the
-    wrong slots (the VM's is `[saved…, iter]` -> `BUILD_* 0` -> `SWAP 2`;
-    the walker has no `iter` on the stack there);
-  * the `LOAD_FAST_AND_CLEAR` save slots are pushed but never popped —
-    the epilogue's `STORE_FAST`s restore them in the VM, while the walker
-    treats stores as target assignments, so they linger on the stack;
-  * `PUSH_NULL` markers then sit between the level's value and the call
-    slot, and the `CALL_FUNCTION_EX` pops pick up the wrong values
-    (`fd(...)` came out as `fd if k == 'Y' else (func, ret, X, Y)(*{}, **{**k})`).
-
-Fixing one of these shifts the divergence to the next (truncating the
-level's stack to its base fixed the kwargs slot but stripped the outer
-operands, and excluding the save slots then leaked the `PUSH_NULL`
-marker into the output), which is exactly why this needs the call model
-reworked rather than another local patch. A correct fix
-therefore starts with making that call model faithful (or by delegating
-the enclosing expression to the main engine's `exec`), and only then
-re-adding the nesting. Emitting a visible syntax error stays preferable
-to silently wrong code, so the modules remain in the failing set.
+The full-module cases previously listed here (`pandas/core/methods/to_dict.py`,
+`sklearn/linear_model/_logistic.py`, and `metrics/pairwise.py`) also exercise
+complex call, closure and control-flow reconstruction. They remain on the
+full-module verification backlog; repairing the nested-comprehension shape
+alone does not establish that every construct in those files is recovered.
 
 ### ~~Multi-link ternary on the value path~~ (fixed 2026-09-15)
 
