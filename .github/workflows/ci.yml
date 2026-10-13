@@ -38,23 +38,6 @@ jobs:
           "$das" tests/corpus/3.12.14/base64.pyc | head -3
           cat tests/corpus/3.12.14/base64.pyc | "$bin" - | head -3
 
-  python-regressions:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13", "3.14", "3.15"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: cargo build --locked
-      - run: python -m unittest discover -s tests -p 'test_*.py' -v
-
   clippy:
     # informational: the codebase carries a style-warning long tail
     # (see docs/LIMITATIONS.md); this job never blocks

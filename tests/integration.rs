@@ -152,6 +152,35 @@ fn py312_hello() {
 }
 
 #[test]
+fn assignment_chains() {
+    // 3.13 introduces fused stores; older fixtures check COPY-only chains.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("assignment_chains.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        for (name, names) in [
+            ("three", &['a', 'b', 'c'][..]),
+            ("four", &['a', 'b', 'c', 'd'][..]),
+            ("five", &['a', 'b', 'c', 'd', 'e'][..]),
+            ("six", &['a', 'b', 'c', 'd', 'e', 'f'][..]),
+        ] {
+            let names: Vec<String> = names.iter().map(char::to_string).collect();
+            let targets = names.join(" = ");
+            let values = names.join(", ");
+            assert_contains(
+                &src,
+                &[
+                    &format!("def {name}(read):\n    {targets} = read()\n    return {values}"),
+                    &format!("def {name}_none():\n    {targets} = None\n    return {values}"),
+                ],
+                &fixture,
+            );
+        }
+        assert_eq!(src.matches("read()").count(), 4, "{fixture}:\n{src}");
+    }
+}
+
+#[test]
 fn py313_hello() {
     let (src, clean) = decompile_fixture("hello.3.13.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
