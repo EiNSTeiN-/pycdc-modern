@@ -169,3 +169,17 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn extended_loop_prefix_preserves_handler_continue() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("extended_loop_prefix.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for count in [1, 30, 60] {
+            let body = "            work(row)\n".repeat(count);
+            let expected = format!(
+                "def size_{count}(rows, work):\n    result = []\n    for row in rows:\n        try:\n{body}        except ValueError:\n            continue\n        result.append(row)");
+            assert_contains(&src, &[&expected], version);
+        }
+    }
+}

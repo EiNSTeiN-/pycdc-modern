@@ -23194,13 +23194,19 @@ impl<'a> Ctx<'a> {
         // so offsets inside a cached instruction have no idx_of entry
         // either - a back edge landing <=8 bytes before the loop top
         // would falsely match a CACHE tail (compileall 3.13 main tore
-        // into an INCOMPLETE stub). The EXTENDED_ARG-prefix shape this
-        // recognizes is pre-3.11 wordcode only (no CACHE gaps).
-        if self.version.at_least(3, 11) {
-            return false;
-        }
+        // into an INCOMPLETE stub). Modern offsets therefore need proof from
+        // original bytes, rather than absence from the instruction map.
         if t >= start || start - t > 8 {
             return false;
+        }
+        if self.version.at_least(3, 11) {
+            if t % 2 != 0 || start % 2 != 0 {
+                return false;
+            }
+            if !(t..start).step_by(2).all(|offset| self.code.code.get(offset)
+                .map_or(false, |byte| self.table.op(*byte) == Op::EXTENDED_ARG)) {
+                return false;
+            }
         }
         // no instruction STARTS at t (idx_of also maps END offsets: the
         // preceding instruction's end lands on t and must not count as
