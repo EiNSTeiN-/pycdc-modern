@@ -159,6 +159,25 @@ fn py313_hello() {
 }
 
 #[test]
+fn generator_expanded_calls() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("generator_expanded_calls.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "def positional(rows, factory):\n    return tuple((factory(*row) for row in rows))",
+                "def keywords(rows, factory):\n    return tuple((factory(*(), **{**dict(row)}) for row in rows))",
+                "def both(rows, factory):\n    return tuple((factory(*row[0], **{**row[1]}) for row in rows))",
+            ],
+            &fixture,
+        );
+        assert_eq!(src.matches("factory(").count(), 3, "{fixture}:\n{src}");
+    }
+}
+
+#[test]
 fn py314_hello() {
     // 3.14 is brand new; accept incomplete-marker output as long as the
     // structure is recovered
