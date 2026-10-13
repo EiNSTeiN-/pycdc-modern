@@ -169,3 +169,23 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn slice_constants_preserve_axes_and_runtime_calls() {
+    for version in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("slice_constants_and_calls.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def dynamic_axes(data, stop):
+    return data[:stop, :]"#,
+            r#"def constant_axes(data, stop):
+    return data[:, :]"#,
+            r#"def mixed_axes(data, stop):
+    return data[1:stop:2, :, 7]"#,
+            r#"def call(data, stop):
+    return data[slice(None, stop, None)]"#,
+            r#"def call_axes(data, stop):
+    return data[slice(None, stop, None), :]"#,
+        ], version);
+    }
+}

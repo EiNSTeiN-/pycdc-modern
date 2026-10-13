@@ -42442,33 +42442,30 @@ fn simplify_not(e: ExprRef) -> ExprRef {
     }
 }
 
-/// 3.14: extended slices arrive as `slice(a, b, c)` calls or marshalled
-/// slice constants; normalize both to Expr::Slice.
+/// Extended indexes can contain actual marshalled slice constants. Preserve
+/// runtime slice calls: their global lookup may be shadowed or have effects.
 fn normalize_slice_call(idx: ExprRef) -> ExprRef {
+    normalize_slice_constant(idx)
+}
+
+/// Normalize actual marshalled slice values inside multi-axis indexes.
+/// A runtime `slice(...)` call must retain its global lookup and evaluation.
+fn normalize_slice_constant(idx: ExprRef) -> ExprRef {
     match &*idx {
-        Expr::Call { func, args, keywords, star_args: None, star_kwargs: None }
-            if keywords.is_empty()
-                && matches!(&**func, Expr::Name(n) if n == "slice")
-                && (2..=3).contains(&args.len())
-                // a starred operand (`slice(*argvals, None)`) cannot be a
-                // slice display — keep the call (yt-dlp jsinterp
-                // `obj[*argvals:]` was not valid source)
-                && args.iter().all(|a| !matches!(&**a, Expr::Starred(_))) =>
-        {
-            Rc::new(Expr::Slice(Box::new(SliceExpr {
-                start: none_if_const_none(args[0].clone()),
-                stop: none_if_const_none(args[1].clone()),
-                step: args.get(2).cloned().and_then(none_if_const_none),
-            })))
-        }
-        Expr::Const(o) => match &**o {
-            PyObject::Slice(a, b, c) => Rc::new(Expr::Slice(Box::new(SliceExpr {
-                start: none_if_const_const(a.clone()),
-                stop: none_if_const_const(b.clone()),
-                step: none_if_const_const(c.clone()),
+        Expr::Const(object) => match &**object {
+            PyObject::Slice(start, stop, step) => Rc::new(Expr::Slice(Box::new(SliceExpr {
+                start: none_if_const_const(start.clone()),
+                stop: none_if_const_const(stop.clone()),
+                step: none_if_const_const(step.clone()),
             }))),
+            PyObject::Tuple(values) if values.iter().any(|value| matches!(&**value, PyObject::Slice(_ , _, _))) =>
+                Rc::new(Expr::Tuple(values.iter().cloned()
+                    .map(|value| normalize_slice_constant(Rc::new(Expr::Const(value)))).collect())),
             _ => idx,
         },
+        Expr::Tuple(values) => Rc::new(Expr::Tuple(
+            values.iter().cloned().map(normalize_slice_constant).collect(),
+        )),
         _ => idx,
     }
 }
