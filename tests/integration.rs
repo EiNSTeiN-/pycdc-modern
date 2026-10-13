@@ -169,3 +169,34 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn overwritten_unpack_slots_reuse_the_surviving_binding() {
+    for version in ["3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("repeated_unpack_bindings.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def repeated_loop(values):
+    result = []
+    for value, discarded, discarded, discarded in values:
+        result.append(value is not None)
+    return result"#,
+            r#"def repeated_list(values):
+    return [value is not None for value, discarded, discarded, discarded in values]"#,
+            r#"def underscore_loop(values):
+    result = []
+    for value, _, discarded, discarded in values:
+        result.append((value, discarded, _))
+    return result"#,
+            r#"def underscore_list(values):
+    return [(value, discarded, _) for value, _, discarded, discarded in values]"#,
+            r#"def nested_loop(values):
+    result = []
+    for value, (discarded, discarded) in values:
+        result.append((value, discarded))
+    return result"#,
+            r#"def nested_list(values):
+    return [(value, discarded) for value, (discarded, discarded) in values]"#,
+        ], version);
+    }
+}
