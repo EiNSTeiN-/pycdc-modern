@@ -169,3 +169,22 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn nested_conditional_comprehension_arms_keep_their_values() {
+    for version in ["3.12", "3.13", "3.14"] {
+        let fixture = format!("nested_conditional_elements.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return [{'excluded': {'count': row['count'], 'reasons': loads(row['reasons']) if row['reasons'] else {}} if row['count'] is not None else {}, 'archived': str(row['archived']) if row['archived'] else None} for row in rows]",
+                "return [build(1 if row.inner else 2) if row.outer else 3 for row in rows]",
+                "return [1 if row.outer else build(2 if row.inner else 3) for row in rows]",
+                "return [build(1 if row.inner is None else 2) if row.outer else build(3 if row.inner is not None else 4) for row in rows]",
+            ],
+            &fixture,
+        );
+    }
+}

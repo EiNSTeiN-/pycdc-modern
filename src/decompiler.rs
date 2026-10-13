@@ -51110,10 +51110,16 @@ fn genexpr_ternary_merge(
                 | Op::POP_JUMP_IF_TRUE
                 | Op::POP_JUMP_FORWARD_IF_FALSE
                 | Op::POP_JUMP_FORWARD_IF_TRUE
+                | Op::POP_JUMP_IF_NONE
+                | Op::POP_JUMP_IF_NOT_NONE
+                | Op::POP_JUMP_FORWARD_IF_NONE
+                | Op::POP_JUMP_FORWARD_IF_NOT_NONE
         )
     };
     let mut jf_target = None;
-    for x in instrs.iter().skip(ii + 1) {
+    let mut j = ii + 1;
+    while j < instrs.len() {
+        let x = instrs[j];
         if x.offset >= t {
             break;
         }
@@ -51130,6 +51136,18 @@ fn genexpr_ternary_merge(
             break;
         }
         if is_cj(x.op) && x.target == Some(t) && !x.is_backward {
+            j += 1;
+            continue;
+        }
+        // A then-arm value may itself contain a conditional dictionary or
+        // another ternary. Consume its complete, pure value region before
+        // searching for this arm's final jump, just as the else-arm does.
+        if is_cj(x.op) {
+            let nested_merge = Self::genexpr_ternary_merge(instrs, j)?;
+            if nested_merge > t {
+                return None;
+            }
+            j = instrs.iter().position(|item| item.offset == nested_merge)?;
             continue;
         }
         // 3.12+: TO_BOOL sits between the value run and the cond jump
@@ -51137,11 +51155,13 @@ fn genexpr_ternary_merge(
         // element rendered as a plain `x`, silently dropping the else
         // arm on EVERY version with the folded ternary shape)
         if matches!(x.op, Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE) {
+            j += 1;
             continue;
         }
         if !Self::comp_arm_value_op(x.op) {
             return None;
         }
+        j += 1;
     }
     let m = jf_target?;
     let ti = instrs.iter().position(|x| x.offset == t)?;
@@ -51157,13 +51177,7 @@ fn genexpr_ternary_merge(
             j += 1;
             continue;
         }
-        if matches!(
-            x.op,
-            Op::POP_JUMP_IF_FALSE
-                | Op::POP_JUMP_IF_TRUE
-                | Op::POP_JUMP_FORWARD_IF_FALSE
-                | Op::POP_JUMP_FORWARD_IF_TRUE
-        ) {
+        if is_cj(x.op) {
             let nm = Self::genexpr_ternary_merge(instrs, j)?;
             let nmi = instrs.iter().position(|x2| x2.offset == nm)?;
             if nmi > mi {

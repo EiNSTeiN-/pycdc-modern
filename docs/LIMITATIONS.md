@@ -62,8 +62,9 @@ equivalent, or (b) a corner with no occurrence in the 520-module corpus.
 - `with a, b:` renders as nested with statements (equivalent).
 - Async gaps: inlined async comprehensions, async-generator asend/athrow
   protocol, the 3.7 SETUP_EXCEPT-guarded async-for break+else combination.
-- Ternaries inside comprehension elements can be misplaced on some old
-  versions.
+- Nested ternaries in either arm of an inlined comprehension element are
+  reconstructed on 3.12+. Ternaries inside comprehension elements can
+  still be misplaced on older versions, including 3.8–3.11.
 - py2 deep-nesting shape "if containing an if + sibling elif + dangling tail
   return" may lose subsequent branches.
 - A few 3.3 modules (_weakrefset/copy/copyreg) are AST-PASS with an empty
