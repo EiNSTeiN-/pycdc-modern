@@ -169,3 +169,27 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn boolean_value_chains_preserve_call_arguments_and_prefixes() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("boolean_call_arguments.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return call(before(), first() and second() or last(), after())",
+                "return call(value, value and second() or last(), after())",
+                "return bool(a and b or c or d or e)",
+                "return bool(c or d or a and b or e)",
+                "return bool(a and a.get('available') or b or c or d or e)",
+                "value = a and a.get('available') or b or c or d or e\n    return bool(value)",
+                "return bool(a or b or c or d or e)",
+                "return bool(a and b and c and d and e)",
+                "return call(a and b or c, d if e else 0)",
+            ],
+            &fixture,
+        );
+    }
+}
