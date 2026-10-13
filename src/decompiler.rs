@@ -259,14 +259,16 @@ struct InlineComp {
     key: Option<ExprRef>,
     cleared_vars: Vec<String>,
     target_seen: bool,
-    /// pending element-ternary folds: (merge offset, condition). The
+    /// Pending value folds: (merge offset, left/condition, optional bool op).
+    /// An and/or fold combines its saved left with the right value; a ternary
+    /// combines its condition with both arm values. The
     /// linear comp walk evaluates BOTH arms of an element ternary onto
     /// the value stack (then under else); when the walk reaches the
     /// ternary's merge offset the pair is folded into a Ternary. This
     /// works for nested ternaries (inner merge folds first) and for
     /// dict-comp key AND value positions alike (folding at the append
     /// op cannot tell which slot a pending cond belongs to).
-    pending_merges: Vec<(usize, ExprRef)>,
+    pending_merges: Vec<(usize, ExprRef, Option<BoolOpKind>)>,
     /// else-arm target shared by the current and-chain's ternary links
     tern_chain_t: Option<usize>,
 }
@@ -31631,6 +31633,26 @@ return None;
             .unwrap_or(false);
         if let Some(comp) = &mut self.inline_comp {
             if self.cur_offset < comp.end {
+                // A 3.12+ value-preserving COPY guard inside an element
+                // is an and/or expression, rather than a comprehension
+                // filter. Its fall-through discards the copied left value.
+                if let Some(&index) = self.idx_of.get(&self.cur_offset) {
+                    let mut previous = index;
+                    while previous > 0 && matches!(self.instrs[previous - 1].op,
+                        Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    { previous -= 1; }
+                    let copied = previous > 0
+                        && self.instrs[previous - 1].op == Op::COPY
+                        && self.instrs[previous - 1].arg == 1;
+                    let discard = self.instrs[index + 1..].iter()
+                        .find(|instruction| !matches!(instruction.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                        .map_or(false, |instruction| instruction.op == Op::POP_TOP);
+                    if copied && discard && target > self.cur_offset && target < comp.end {
+                        comp.pending_merges.push((target, cond,
+                            Some(if jump_if_true { BoolOpKind::Or } else { BoolOpKind::And })));
+                        return;
+                    }
+                }
                 // element ternary guard: same recognition as the
                 // code-object builder (a forward JF between the jump
                 // and its target skips the else arm to a merge, both
@@ -31670,7 +31692,7 @@ return None;
                                     });
                                 }
                             } else {
-                                comp.pending_merges.push((m_off, cj));
+                                comp.pending_merges.push((m_off, cj, None));
                                 comp.tern_chain_t = Some(t_off);
                             }
                             return;
@@ -52863,20 +52885,22 @@ impl<'a> Ctx<'a> {
         // arm-skip JFs all land on the append): fold them all,
         // innermost (LAST recorded) first so the stack pairs line up
         while let Some(idx) = self.inline_comp.as_ref().and_then(|c| {
-            c.pending_merges.iter().rposition(|(m, _)| *m == offset)
+            c.pending_merges.iter().rposition(|(m, _, _)| *m == offset)
         }) {
-            let (_, cond) = self
+            let (_, cond, bool_op) = self
                 .inline_comp
                 .as_mut()
                 .map(|c| c.pending_merges.remove(idx))
                 .unwrap();
             let else_v = self.pop_expr();
-            let then_v = self.pop_expr();
-            self.push(Rc::new(Expr::Ternary {
-                cond,
-                then_expr: then_v,
-                else_expr: else_v,
-            }));
+            if let Some(op) = bool_op {
+                self.push(Rc::new(Expr::BoolOp { op, values: vec![cond, else_v] }));
+            } else {
+                let then_v = self.pop_expr();
+                self.push(Rc::new(Expr::Ternary {
+                    cond, then_expr: then_v, else_expr: else_v,
+                }));
+            }
         }
     }
 

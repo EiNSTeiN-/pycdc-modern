@@ -169,3 +169,28 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn comprehension_boolean_values_remain_elements_not_filters() {
+    for version in ["3.12", "3.13", "3.14"] {
+        let fixture = format!("comprehension_boolean_values.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return [max(0.0, float(row.get('x') or 0.0)) for row in rows]",
+                "return [row[1] or 0 for row in rows]",
+                "return [row[1] and 7 for row in rows]",
+                "return {row[1] or 0 for row in rows}",
+                "return {row[0]: row[1] and 7 for row in rows}",
+                "return [row.first() or row.second() for row in rows]",
+                "return [row.first() and row.second() for row in rows]",
+                "return [row[1] for row in rows if row[0]]",
+                "return [row[1] or 0 for row in rows if row[0]]",
+                "return [row[1] if row[0] else 0 for row in rows]",
+            ],
+            &fixture,
+        );
+    }
+}
