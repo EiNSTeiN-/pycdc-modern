@@ -509,3 +509,19 @@ nine padding instructions. They check instruction and exception bytes, output,
 context lifetime, call order, failures, cancellation and suppression. The full
 native behavior suite passes 72 methods. Failed earlier gates are preserved;
 stable promotion still requires the new complete corpus retention audit.
+
+Version 0.6.30 development retains a nested exit whose split handler walk
+has lost both lexical Try and With blocks. The original exception table still
+protects that exit with a known context handler; keep its existing carried
+return protocol. Ordinary open-context and unprotected walks retain their
+previous behavior. The .29 full-corpus gate is preserved: fifteen raw gains
+and one lost reader match, so that version was not promoted.
+
+The new public native fixture checks that the calculated return remains in
+the real exit protocol after a conditional early return, a typed parsing
+handler and a second live query. The native suite passes 73 methods. The
+unpacker suite independently proves complete instruction and exception tables
+for this layout and 396 paired cases across three reader fixtures, including
+context lifetime, error/suppression/cancellation paths and parsed return data.
+The targeted original reader again matches all 68 units; full frozen corpus
+retention remains required before stable promotion.

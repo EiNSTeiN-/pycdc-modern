@@ -13990,8 +13990,23 @@ impl<'a> Ctx<'a> {
                                 && instruction.arg == 2
                         });
                         let split_protected_walk = self.blocks.iter().any(|block| block.kind == BlockType::Try);
-                        if !is_async_exit || !split_protected_walk {
+                        if !is_async_exit {
                             return true;
+                        }
+                        if !split_protected_walk {
+                            // A split handler walk can lose both its Try and
+                            // lexical With blocks while the original exception
+                            // table still protects a nested exit. Preserve the
+                            // existing protocol in that displaced fragment;
+                            // ordinary open-With walks keep their established
+                            // success-exit handling.
+                            let has_open_with = self.blocks.iter().any(|block| block.kind == BlockType::With);
+                            let protected_by_with = self.exc_entries.iter().any(|entry| {
+                                entry.start <= self.cur_offset
+                                    && self.cur_offset < entry.end
+                                    && self.with_region_handlers.values().any(|handler| *handler == entry.target)
+                            });
+                            return has_open_with || !protected_by_with;
                         }
                         let Some(owner) = self.blocks.iter().rfind(|block| block.kind == BlockType::With) else {
                             // A displaced return must retain its protocol

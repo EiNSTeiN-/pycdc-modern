@@ -62,6 +62,50 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    def test_displaced_handler_query_keeps_the_carried_return_protocol(self):
+        import ast
+        source = '''async def work(owner):
+    try:
+        async with owner:
+            async with owner.query("row0") as query:
+                first = await query.read()
+            if not first:
+                return
+            parsed = None
+            if first[0]:
+                try:
+                    parsed = owner.parse(first[0])
+                except ValueError:
+                    pass
+            async with owner.query("row1") as query:
+                second = (await query.read())[0]
+            loaded = second > 0
+            return owner.build(first, loaded, parsed)
+    except Exception as error:
+        owner.record(error)
+        return
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'fixture.pyc'
+            code = compile(source, 'owned-handler-fragment', 'exec', dont_inherit=True)
+            path.write_bytes(importlib.util.MAGIC_NUMBER + bytes(12) + marshal.dumps(code))
+            process = subprocess.run([str(BINARY), str(path)], capture_output=True,
+                                     text=True, timeout=10)
+            self.assertEqual(process.returncode, 0)
+            tree = ast.parse(process.stdout)
+        # The source API can reconstruct the split scopes only if the native
+        # AST retains the calculated value inside its actual exit protocol.
+        exits = [node for node in ast.walk(tree) if isinstance(node, ast.Await)
+                 and isinstance(node.value, ast.Call)
+                 and isinstance(node.value.func, ast.Constant)
+                 and node.value.func.value is None]
+        self.assertEqual(len(exits), 1)
+        call = exits[0].value
+        self.assertEqual(len(call.args), 4)
+        self.assertEqual(ast.unparse(call.args[0]), 'owner.build(first, loaded, parsed)')
+        self.assertTrue(all(isinstance(value, ast.Constant) and value.value is None
+                            for value in call.args[1:]))
+
     def async_exit_outcome(self, function, fault, suppression, count=1, ready=False):
         class Owner:
             active = False
