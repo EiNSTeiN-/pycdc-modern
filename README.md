@@ -494,3 +494,18 @@ and test all clause failures, inner logging/closing faults, cancellation,
 empty input and successful iteration. Both previously unproved private and
 no-private break fixtures are now exact; the full behavior suite passes 69
 methods. Full corpus retention is required before stable promotion.
+
+Version 0.6.29 development narrows normal async exit consumption after the
+0.6.27 full-corpus gate exposed ten prior regressions. A Return carried through
+the protocol, including a constant Return or a Return behind padding, keeps
+the established value path. In a split protected walk, an exit still protected
+by the open outer context retains its existing CALL/accounting path. A displaced
+exit without an open owning context also retains the source reconstruction
+protocol. Ordinary unprotected normal exits continue using the new recognizer.
+
+Three owned methods add 486 paired cases: calculated/scalar/container Returns,
+constant Returns after one/two/eight sequential query contexts, and one/three/
+nine padding instructions. They check instruction and exception bytes, output,
+context lifetime, call order, failures, cancellation and suppression. The full
+native behavior suite passes 72 methods. Failed earlier gates are preserved;
+stable promotion still requires the new complete corpus retention audit.

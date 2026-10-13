@@ -11412,6 +11412,7 @@ impl<'a> Ctx<'a> {
         while matches!(self.instrs.get(k).map(|x| x.op), Some(op) if matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)) {
             k += 1;
         }
+        let mut async_exit = false;
         if self.instrs.get(k).map(|x| (x.op, x.arg)) == Some((Op::GET_AWAITABLE, 2)) {
             // The compiler marks an __aexit__ await with operand 2. A
             // user-authored await uses operand 0 and must remain visible.
@@ -11447,11 +11448,32 @@ impl<'a> Ctx<'a> {
                 return None;
             }
             k = end + 1;
+            async_exit = true;
             while matches!(self.instrs.get(k).map(|x| x.op), Some(op) if matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)) {
                 k += 1;
             }
         }
         if self.instrs.get(k).map(|x| x.op) != Some(Op::POP_TOP) {
+            return None;
+        }
+        let mut tail = k + 1;
+        while self.instrs.get(tail).map_or(false, |x| is_pad(x)) {
+            tail += 1;
+        }
+        let mut return_at = tail + 1;
+        while self.instrs.get(return_at).map_or(false, |x| is_pad(x)) {
+            return_at += 1;
+        }
+        if async_exit && self.instrs.get(tail).map_or(false, |x| {
+            matches!(x.op, Op::RETURN_VALUE | Op::RETURN_CONST)
+                || (matches!(x.op, Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::LOAD_COMMON_CONSTANT)
+                    && self.instrs.get(return_at).map_or(false, |next| {
+                    matches!(next.op, Op::RETURN_VALUE | Op::RETURN_CONST)
+                }))
+        }) {
+            // A calculated return can carry its value through this same
+            // exit await. Keep the historical return protocol; closing the
+            // With here can discard that value or eject its source Return.
             return None;
         }
         Some(self.instrs[k].end())
@@ -13960,7 +13982,34 @@ impl<'a> Ctx<'a> {
                 // _maybe_compile: the leak rendered `None(None, None)`
                 // and trapped the post-with tail return inside the with)
                 if self.version.at_least(3, 11) && self.with_exits > 0 {
-                    if let Some(after) = self.inline_with_exit_span(self.cur_offset) {
+                    if let Some(after) = self.inline_with_exit_span(self.cur_offset).filter(|after| {
+                        let is_async_exit = self.instrs.iter().any(|instruction| {
+                            instruction.offset >= self.cur_offset
+                                && instruction.offset < *after
+                                && instruction.op == Op::GET_AWAITABLE
+                                && instruction.arg == 2
+                        });
+                        let split_protected_walk = self.blocks.iter().any(|block| block.kind == BlockType::Try);
+                        if !is_async_exit || !split_protected_walk {
+                            return true;
+                        }
+                        let Some(owner) = self.blocks.iter().rfind(|block| block.kind == BlockType::With) else {
+                            // A displaced return must retain its protocol
+                            // value for the source fidelity reconstruction.
+                            return false;
+                        };
+                        // An exit protected by the open With belongs to a
+                        // nested context. Keep its existing CALL/accounting
+                        // path; consuming it here also consumes the outer
+                        // return's exit slot in a split protected walk.
+                        !owner.with_handler.map_or(false, |handler| {
+                            self.exc_entries.iter().any(|entry| {
+                                entry.start <= self.cur_offset
+                                    && self.cur_offset < entry.end
+                                    && entry.target == handler
+                            })
+                        })
+                    }) {
                         // close the With ONLY when it is topmost: a sunk
                         // exit inside an open branch arm (`if quitting:
                         // return` — bdb 3.12 trace_dispatch) must keep

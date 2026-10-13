@@ -159,6 +159,49 @@ class Python314RoundTrip(unittest.TestCase):
         for ready in (False, True):
             self.check_async_exit_source(source, ready=ready)
 
+    def test_async_success_exit_preserves_constant_return_inside_context(self):
+        for count in (1, 2, 8):
+            source = 'async def select(owner):\n    async with owner:\n'
+            for index in range(count):
+                source += (f'        async with owner.query("row{index}") as query:\n'
+                           f'            row{index} = await query.read()\n')
+            source += '        return 4\n'
+            self.check_async_exit_source(source, count)
+
+    def test_async_success_exit_preserves_carried_return_value(self):
+        for count in (1, 2, 8):
+            for expression in ('row0', 'owner.build(row0, row0)', '{"value": row0}'):
+                source = 'async def select(owner):\n    async with owner:\n'
+                for index in range(count):
+                    source += (f'        async with owner.query("row{index}") as query:\n'
+                               f'            row{index} = await query.read()\n')
+                source += '        return ' + expression + '\n'
+                self.check_async_exit_source(source, count)
+
+    def test_async_success_exit_preserves_padded_return_protocol(self):
+        import types
+        for expression in ('4', '{"value": row0}'):
+            source = ('async def select(owner):\n    async with owner:\n'
+                      '        async with owner.query("row0") as query:\n'
+                      '            row0 = await query.read()\n'
+                      '        return ' + expression + '\n')
+            module = compile(source, 'owned-original', 'exec', dont_inherit=True)
+            code = next(value for value in module.co_consts if isinstance(value, types.CodeType))
+            for padding in (1, 3, 9):
+                padded = pad_return_values(self, code, padding)
+                exported = module.replace(co_consts=tuple(
+                    padded if value is code else value for value in module.co_consts))
+                original, recovered = self.recover_code(exported)
+                self.assertEqual(code.co_code, recovered.__code__.co_code)
+                self.assertEqual(code.co_exceptiontable, recovered.__code__.co_exceptiontable)
+                for fault in ('', 'outer-enter', 'outer-exit', 'query-enter', 'query-exit',
+                              'read', 'read-cancel', 'build', 'build-cancel'):
+                    for suppression in ('', 'outer', 'query'):
+                        with self.subTest(expression=expression, padding=padding,
+                                          fault=fault, suppression=suppression):
+                            self.assertEqual(self.async_exit_outcome(original, fault, suppression),
+                                             self.async_exit_outcome(recovered, fault, suppression))
+
     PRIVATE_CLAUSE_SOURCE = '''async def select(owner):
     accepted = False
     for candidate in owner.candidates:
