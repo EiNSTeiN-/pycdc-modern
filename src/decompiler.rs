@@ -43919,6 +43919,24 @@ impl<'a> Ctx<'a> {
             .iter()
             .map(|x| (canon(x.op), x.arg))
             .collect();
+        // Masked runtime exits can leave padding between POP_EXCEPT and
+        // a return whose value was computed earlier. Padding is not a
+        // value-building tail: matching it against the mainline would
+        // swallow the actual response/call and resume with an empty stack.
+        // Look through padding, then require a real independent value head.
+        let head = tail.iter().find(|(op, _)| !matches!(
+            op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::EXTENDED_ARG | Op::RESUME
+        ));
+        let value_head = head.map_or(false, |(op, arg)| {
+            matches!(op, Op::LOAD_FAST | Op::LOAD_FAST_LOAD_FAST | Op::LOAD_NAME
+                | Op::LOAD_DEREF | Op::LOAD_CLASSDEREF | Op::LOAD_GLOBAL
+                | Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::LOAD_COMMON_CONSTANT)
+                || (*arg == 0 && matches!(op,
+                    Op::BUILD_TUPLE | Op::BUILD_LIST | Op::BUILD_SET | Op::BUILD_MAP))
+        });
+        if !value_head {
+            return None;
+        }
         // require a NON-DEGENERATE tail: at least one value op before
         // the RETURN. A lone RETURN_VALUE (the clause's value was
         // loaded+SWAPed UNDER the POP_EXCEPT, _collections_abc 3.12

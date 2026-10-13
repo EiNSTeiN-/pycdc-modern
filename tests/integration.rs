@@ -169,3 +169,46 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn real_value_build_still_matches_the_sunk_tail() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("sunk_value_return_control.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def select(value):
+    try:
+        entry = value.entry
+    except AttributeError:
+        kind = 'missing'
+    else:
+        kind = 'present'
+    return kind, value"#,
+        ], version);
+    }
+}
+
+#[test]
+fn padding_does_not_match_a_mainline_value_build() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        for padding in [1, 3, 9] {
+            let (src, clean) = decompile_fixture(
+                &format!("padded_value_returns_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, {padding} NOPs: incomplete:\n{src}");
+            assert_contains(&src, &[
+                r#"def synchronous(read, build):
+    try:
+        item = read()
+    except ValueError:
+        return build('missing')
+    return build(item)"#,
+                r#"async def asynchronous(read, build):
+    try:
+        item = await read()
+    except ValueError:
+        return build('missing')
+    return build(item)"#,
+            ], version);
+        }
+    }
+}
