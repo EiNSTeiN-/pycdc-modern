@@ -7745,6 +7745,24 @@ impl<'a> Ctx<'a> {
                 | Op::DELETE_DEREF => {
                     k2 += 1;
                 }
+                Op::POP_TOP => {
+                    // A For-handler break drops the live iterator after
+                    // POP_EXCEPT and any named cleanup, immediately before
+                    // its jump to the registered loop exit. The iterator
+                    // discard is machinery, but that jump still represents
+                    // a source Break. Do not skip arbitrary body POP_TOPs.
+                    let next = self.instrs.get(k2 + 1);
+                    let iterator_exit = next.map_or(false, |jump| {
+                        matches!(jump.op, Op::JUMP_FORWARD | Op::JUMP_BACKWARD
+                            | Op::JUMP_ABSOLUTE | Op::JUMP)
+                            && jump.target.and_then(|target| self.find_loop_exit(target))
+                                .map_or(false, |index| self.blocks[index].kind == BlockType::For)
+                    });
+                    if !iterator_exit {
+                        break;
+                    }
+                    k2 += 1;
+                }
                 Op::RETURN_VALUE | Op::RETURN_CONST => {
                     // a sunk implicit tail `return None` (3.12+
                     // function-tail try: POP_EXCEPT; RETURN_CONST None —

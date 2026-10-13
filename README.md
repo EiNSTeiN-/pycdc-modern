@@ -480,3 +480,17 @@ exit/build faults, cancellation, inner and outer suppression, event order and
 whether the outer context is active when the returned payload is built. The
 full behavior suite passes 67 methods. The separate nested constant-return
 layout remains unproved. Full corpus retention is required before promotion.
+
+Version 0.6.28 development retains a For-handler break after its iterator
+discard. After POP_EXCEPT and named cleanup, a single POP_TOP immediately
+before a jump to a registered For exit is compiler machinery. Continue to
+that authoritative exit jump so the clause ends with Break. Arbitrary body
+discards and While targets do not qualify.
+
+Two owned methods add 78 paired cases across sync/async named handlers,
+unnamed tuple/generic handlers, and private/no-private scopes. They compare
+complete instruction and exception bytes, including the post-loop await,
+and test all clause failures, inner logging/closing faults, cancellation,
+empty input and successful iteration. Both previously unproved private and
+no-private break fixtures are now exact; the full behavior suite passes 69
+methods. Full corpus retention is required before stable promotion.

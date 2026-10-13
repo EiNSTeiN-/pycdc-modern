@@ -281,6 +281,42 @@ class Python314RoundTrip(unittest.TestCase):
         self.check_private_clause_source(single)
         self.check_private_clause_source(direct)
 
+    def handler_break_sources(self):
+        source = self.PRIVATE_CLAUSE_SOURCE.replace(
+            'await owner.log("transient", str(error))\n            continue',
+            'await owner.log("transient", str(error))\n            break').replace(
+            'await owner.log("unavailable", str(error))\n            continue',
+            'await owner.log("unavailable", str(error))\n            break')
+        direct = source.replace('''                try:
+                    changed = bool(await owner.close(candidate))
+                    details = "closed" if changed else "terminal"
+                except RuntimeError as inner:
+                    await owner.log("close-failed", str(inner))''',
+            '''                changed = bool(await owner.close(candidate))
+                details = "closed" if changed else "terminal"''')
+        return source, direct
+
+    def test_named_for_handler_break_keeps_iterator_cleanup_and_post_loop_work(self):
+        for source in self.handler_break_sources():
+            for asynchronous in (False, True):
+                fixture = source
+                if not asynchronous:
+                    fixture = fixture.replace('async def ', 'def ').replace('await ', '')
+                self.check_private_clause_source(fixture, asynchronous)
+
+    def test_unnamed_for_handler_break_keeps_tuple_and_generic_clause_scope(self):
+        for source in self.handler_break_sources():
+            source = source.replace(
+                'except (OSError, asyncio.TimeoutError) as error:\n'
+                '            await owner.log("transient", str(error))',
+                'except (OSError, asyncio.TimeoutError):\n'
+                '            await owner.log("transient", "owned fault")').replace(
+                'except Exception as error:\n'
+                '            await owner.log("unavailable", str(error))',
+                'except Exception:\n'
+                '            await owner.log("unavailable", "owned fault")')
+            self.check_private_clause_source(source)
+
     def nested_handler_outcome(self, function, case, asynchronous=False):
         class Owner:
             def __init__(self):
