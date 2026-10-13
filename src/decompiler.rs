@@ -15280,8 +15280,8 @@ impl<'a> Ctx<'a> {
                 let (ex_kws, star_kw) = if let Some(kw) = kwargs_opt {
                     let (k, s) = flatten_ex_kwargs(kw.clone());
                     // a DICT_MERGE-built kwargs dict with const keys
-                    // plus ONE trailing star is the compiler's own
-                    // layout for `f(kw=..., **x)` — decompose it back
+                    // plus expansion entries is the compiler's own
+                    // layout for `f(kw=..., **x, **y)` — decompose it back
                     // (the whole-dict rendering recompiles to
                     // BUILD_MAP + DICT_UPDATE and breaks sig-exactness;
                     // configparser 3.12 _get_conv). A DICT_UPDATE-built
@@ -15295,34 +15295,24 @@ impl<'a> Ctx<'a> {
                             break 'dc None;
                         }
                         if let Expr::Dict(entries) = &*kw {
-                            if entries.len() >= 2
-                                && matches!(
-                                    &*entries[entries.len() - 1].0,
-                                    Expr::Starred(_)
-                                )
-                                && entries[..entries.len() - 1].iter().all(
-                                    |(kk, _)| {
-                                        matches!(&**kk, Expr::Const(o)
-                                            if matches!(&**o, PyObject::Str(_)))
-                                    },
-                                )
-                            {
+                            if entries.iter().any(|(key, _)| matches!(&**key, Expr::Starred(_))) {
                                 let mut kws = Vec::new();
-                                for (kk, v) in &entries[..entries.len() - 1] {
-                                    if let Expr::Const(o) = &**kk {
-                                        if let PyObject::Str(name) = &**o {
-                                            kws.push((
-                                                Some(name.clone()),
-                                                v.clone(),
-                                            ));
+                                let mut named = Vec::new();
+                                for (key, value) in entries {
+                                    match &**key {
+                                        Expr::Starred(inner) => kws.push((None, inner.clone())),
+                                        Expr::Const(object) => {
+                                            let PyObject::Str(name) = &**object else { break 'dc None; };
+                                            if !is_kw_name_ok(name) || named.contains(name) {
+                                                break 'dc None;
+                                            }
+                                            named.push(name.clone());
+                                            kws.push((Some(name.clone()), value.clone()));
                                         }
+                                        _ => break 'dc None,
                                     }
                                 }
-                                if let Expr::Starred(inner) =
-                                    &*entries[entries.len() - 1].0
-                                {
-                                    break 'dc Some((kws, Some(inner.clone())));
-                                }
+                                break 'dc Some((kws, None));
                             }
                         }
                         None
@@ -47810,7 +47800,11 @@ impl<'a> Ctx<'a> {
                     _ => Vec::new(),
                 };
                 match &*other {
-                    Expr::Dict(d) => entries.extend(d.iter().cloned()),
+                    // A call expansion of a constructed dictionary keeps
+                    // that boundary. Flattening it into outer DICT_MERGE
+                    // entries would change its internal DICT_UPDATE's
+                    // overwrite semantics into duplicate-key errors.
+                    Expr::Dict(d) if inst.op == Op::DICT_UPDATE => entries.extend(d.iter().cloned()),
                     o => entries.push((
                         Rc::new(Expr::Starred(Rc::new(o.clone()))),
                         self.name_expr(""),
@@ -51362,7 +51356,7 @@ fn genexpr_ternary_merge(
                         _ => Vec::new(),
                     };
                     match &*other {
-                        Expr::Dict(d) => entries.extend(d.iter().cloned()),
+                        Expr::Dict(d) if inst.op == Op::DICT_UPDATE => entries.extend(d.iter().cloned()),
                         o => entries.push((
                             Rc::new(Expr::Starred(Rc::new(o.clone()))),
                             Rc::new(Expr::Name(String::new())),

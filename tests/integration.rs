@@ -169,3 +169,26 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn keyword_expansions_keep_merge_checks_and_dictionary_boundaries() {
+    for version in ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("ordered_keyword_expansions.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return fn(1, fixed=2, **first, **second)",
+                "return fn(1, **first, **{'fixed': 2}, **second)",
+                "return fn(1, **first, **second)",
+                "return fn(1, **{'fixed': 2, **first, **second})",
+                "return fn(1, **{'my col': 2, **first, **second})",
+                "return fn(1, **{'class': 2, **first, **second})",
+                "return fn(1, **{'fixed': 2, 'fixed': 3, **first, **second})",
+                "return fn(1, fixed=2, **get_first(), **get_second())",
+            ],
+            &fixture,
+        );
+    }
+}

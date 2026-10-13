@@ -1134,6 +1134,8 @@ impl Printer {
                     first = false;
                     if let Some(kn) = k {
                         self.write(&format!("{kn}="));
+                    } else {
+                        self.write("**");
                     }
                     self.expr(v, prec::TERNARY);
                 }
