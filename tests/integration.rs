@@ -26,6 +26,44 @@ fn assert_contains(haystack: &str, needles: &[&str], ctx: &str) {
 }
 
 #[test]
+fn split_exception_suites_generate_one_complete_try_statement() {
+    use pycdc::ast::{ExceptHandler, Expr, Stmt};
+    use pycdc::version::PythonVersion;
+    use std::rc::Rc;
+    let name = |value: &str| Rc::new(Expr::Name(value.into()));
+    let inner = Stmt::Try {
+        body: vec![Stmt::Expr(name("work")), Stmt::Expr(name("more_work"))],
+        handlers: vec![ExceptHandler {
+            type_: Some(name("ValueError")), name: Some(name("error")),
+            body: vec![Stmt::Expr(name("handled"))], is_star: false,
+        }],
+        orelse: vec![], finalbody: vec![],
+    };
+    let outer = Stmt::Try {
+        body: vec![inner.clone()], handlers: vec![],
+        orelse: vec![Stmt::Expr(name("success"))],
+        finalbody: vec![Stmt::Expr(name("cleanup")), Stmt::Expr(name("more_cleanup"))],
+    };
+    let module = PycModule::from_bytes(include_bytes!("pyc/hello.3.14.pyc")).unwrap();
+    // Unified try/except/finally syntax starts in Python 2.5. The repair
+    // concerns the recovered AST shape, rather than one opcode version.
+    for (major, minor) in [(2, 5), (2, 7), (3, 8), (3, 11), (3, 12), (3, 13), (3, 14)] {
+        let version = PythonVersion { major, minor, ..module.version() };
+        let binding = if major == 2 { ", error" } else { " as error" };
+        let expected = format!("try:\n    work\n    more_work\nexcept ValueError{binding}:\n    handled\nelse:\n    success\nfinally:\n    cleanup\n    more_cleanup\n");
+        assert_eq!(generate(&[outer.clone()], version, true), expected);
+
+        // A legitimate outer try/finally has no success suite to reunite.
+        let nested = Stmt::Try {
+            body: vec![inner.clone()], handlers: vec![], orelse: vec![],
+            finalbody: vec![Stmt::Expr(name("cleanup"))],
+        };
+        let expected = format!("try:\n    try:\n        work\n        more_work\n    except ValueError{binding}:\n        handled\nfinally:\n    cleanup\n");
+        assert_eq!(generate(&[nested], version, true), expected);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

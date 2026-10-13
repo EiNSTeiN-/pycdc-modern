@@ -105,19 +105,20 @@ the installed source):
   packaging/pylock (CALL-chain underflow in `select`: three stacked CALLs
   after an arg-position ternary)
 
-## Remaining non-parsing shapes (2 files of the full-stdlib corpora)
+## Remaining reconstruction gaps (2 files of the full-stdlib corpora)
 
-Full-stdlib benchmarks (1017 modules of 3.12.14, 1251 of 3.8.20) leave
-exactly two modules whose decompiled output does not parse. Both are
-marked incomplete (never a crash, never silent corruption) and both are
-structural reconstruction gaps in the loop-guard machinery rather than
-rendering bugs:
+Full-stdlib benchmarks (1017 modules of 3.12.14, 1251 of 3.8.20) identified
+two modules with non-parsing output. The remaining reconstruction gaps are
+tracked below; correcting a split statement's printing does not establish
+semantic correctness for the entire module.
 
 - `multiprocessing/connection.pyc` 3.12 — `try: ... except OSError: ...
-  else: <nested try/except/finally>` : the else body is emitted as a
-  sibling statement and the outer `else:`/`finally:` labels then land
-  after it, so the file dies with `expected 'except' or 'finally'
-  block`. Reproduces in `PipeListener.accept` (win32 branch).
+  else: <nested try/except/finally>` in `PipeListener.accept` (win32
+  branch): reconstruction can still displace the else body or duplicate
+  cleanup. The printer now rejoins a handler-less outer try's else/finally
+  with its sole inner handler-bearing try, removing the unattached-else
+  syntax error for that split shape. The exception-region structure still
+  needs correction.
 - `random.pyc` 3.8 — `while True: if not 1e-7 < u1 < 0.9999999:
   continue` : a negated multi-link guard at a loop top loses the
   enclosing `while True` entirely and degrades into
