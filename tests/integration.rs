@@ -169,3 +169,25 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn deferred_class_annotations_keep_registration_gates() {
+    let fixture = "class_annotation_registration.3.14.pyc";
+    let (src, clean) = decompile_fixture(fixture);
+    assert!(clean, "output marked incomplete:\n{src}");
+    assert!(src.starts_with("module_count: int = 5\n"), "{src}");
+    assert_contains(
+        &src,
+        &[
+            "class Always:",
+            "'''Documented class.'''",
+            "    if True:\n        amount: int = 3\n        label: str = 'ready'",
+            "        if enabled:\n            if True:\n                label: str = 'ready'",
+            "        for value in values:\n            if True:\n                limit: int = default(value)",
+            "        for value in values:\n            if True:\n                amount: int = default(value)",
+            "def read(self) -> int:",
+        ],
+        fixture,
+    );
+    assert!(!src.contains("__conditional_annotations__"), "{src}");
+}

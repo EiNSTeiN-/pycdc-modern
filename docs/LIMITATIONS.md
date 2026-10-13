@@ -50,6 +50,9 @@ equivalent, or (b) a corner with no occurrence in the 520-module corpus.
 - Function/method/module/class-level annotations are restored to real
   annotation statements, including `__conditional_annotations__`-gated ones;
   runtime `get_annotations` VALUE/FORWARDREF match the original exactly.
+- Live class registration gates retain `if True` blocks when necessary,
+  including constant-folded conditions, so recompilation preserves the
+  annotation function's closure and per-entry registration.
 - **Corner**: entries inside dead branches the compiler folded away
   (`if False:`) are dropped — VALUE/FORWARDREF semantics still match; only
   the STRING-format annotation dict differs (the original keeps the dead
