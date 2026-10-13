@@ -72,3 +72,10 @@ if __name__ == "__main__":
             for value in module.co_consts))
         path = root / f"tests/pyc/padded_value_returns_{count}.{version}.pyc"
         path.write_bytes(header + marshal.dumps(padded))
+        if count == 3:
+            # Also exercise a representative padded input in verify_corpus.py.
+            # Keep the directory named after the interpreter producing the pyc.
+            corpus = root / "tests/corpus" / ".".join(map(str, sys.version_info[:3]))
+            corpus.mkdir(parents=True, exist_ok=True)
+            (corpus / "padded_value_returns_3.py").write_bytes(source)
+            (corpus / "padded_value_returns_3.pyc").write_bytes(header + marshal.dumps(padded))
