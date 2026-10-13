@@ -523,5 +523,10 @@ handler and a second live query. The native suite passes 73 methods. The
 unpacker suite independently proves complete instruction and exception tables
 for this layout and 396 paired cases across three reader fixtures, including
 context lifetime, error/suppression/cancellation paths and parsed return data.
-The targeted original reader again matches all 68 units; full frozen corpus
-retention remains required before stable promotion.
+The targeted original reader again matches all 68 units. The complete frozen
+274-module gate retains every prior raw/composite unit and complete module:
+fifteen raw gains, zero losses, reaching 13,925 units and 137 complete raw
+candidates. All 274 sources compile. The frozen source overlay remains
+14,242 matches/246 complete candidates; its owner reconstructions already
+cover these native gains and receive no second corpus credit. This closes the
+prior .27/.29 retention failures under unchanged source/comparison rules.
