@@ -449,3 +449,19 @@ awaits, named/multiple/same-type handlers and two sibling handlers per row.
 Complete instruction and exception bytes agree in all accepted fixtures;
 independent no-loop, sequential and outer-finally controls remain exact.
 The full 274-module raw/composite zero-loss gate is required before promotion.
+
+Version 0.6.26 development follows a typed exception clause reached by the
+preceding match's explicit false edge even when a private try limits that
+preceding clause's body. The body subwalk retains its existing boundary; only
+ordinary pattern loads followed by CHECK_EXC_MATCH and a forward mismatch
+jump can extend the clause-parser limit. A new handler head, cleanup or an
+unrecognized instruction stops that pattern check. This does not widen the
+private body's subwalk or repair the separate post-loop break issue.
+
+Three owned methods add 65 paired cases across sync/async private handlers,
+named and tuple patterns, attribute patterns, single-clause and no-private
+controls. They cover normal/empty input, each exception clause, private close
+failure, no-close and terminal branches, cancellation, handler logging failure,
+and post-loop failure. All five fixture layouts match complete instruction and
+exception bytes; the full behavior suite passes 65 methods. Full corpus
+retention remains required before stable promotion or application claims.

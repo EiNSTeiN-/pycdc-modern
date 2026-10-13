@@ -6629,6 +6629,32 @@ impl<'a> Ctx<'a> {
         stmts
     }
 
+    /// Bound a typed clause reached by the preceding match's false edge.
+    /// Only ordinary pattern loads followed by CHECK_EXC_MATCH and its
+    /// forward mismatch jump qualify; never cross a new handler or cleanup.
+    fn following_except_clause_end(&self, from: usize) -> Option<usize> {
+        let start = *self.idx_of.get(&from)?;
+        for (index, inst) in self.instrs.iter().enumerate().skip(start).take(32) {
+            if inst.op == Op::CHECK_EXC_MATCH {
+                let jump = self.instrs.get(index + 1)?;
+                if matches!(jump.op, Op::POP_JUMP_IF_FALSE | Op::POP_JUMP_FORWARD_IF_FALSE)
+                    && jump.target.map_or(false, |target| target > jump.offset)
+                {
+                    return Some(jump.end());
+                }
+                return None;
+            }
+            if !matches!(inst.op,
+                Op::LOAD_GLOBAL | Op::LOAD_NAME | Op::LOAD_FAST | Op::LOAD_DEREF
+                | Op::LOAD_ATTR | Op::LOAD_METHOD | Op::BUILD_TUPLE
+                | Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+            {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Parse an out-of-line except-dispatch handler region (3.11+):
     /// PUSH_EXC_INFO followed by `[pattern; CHECK_EXC_MATCH; PJIF next]*`
     /// clause bodies, ending in RERAISE.
@@ -6637,6 +6663,11 @@ impl<'a> Ctx<'a> {
         let mut clause_offsets: Vec<usize> = Vec::new();
         let region_end = self.handler_region_end(from);
         let end = self.dispatch_region_end(from);
+        let private_body_cutoff = end < region_end
+            && self.exc_entries.iter().any(|entry| {
+                entry.start == end && entry.target == region_end
+            });
+        let mut dispatch_limit = end;
         // nesting: this chain's own cleanup region ends exactly where the
         // next chain begins — that chain handles re-raises FROM this one,
         // i.e. it is the ENCLOSING try's dispatch. Adjacency must be exact
@@ -6779,7 +6810,7 @@ impl<'a> Ctx<'a> {
         let mut eg_chain = false;
         while pc < self.instrs.len() {
             let inst = self.instrs[pc];
-            if inst.offset >= end
+            if inst.offset >= dispatch_limit
                 && !handlers.is_empty()
                 && !(nested && inst.offset < self.chain_extent(from))
             {
@@ -6830,6 +6861,15 @@ impl<'a> Ctx<'a> {
                 | Op::POP_JUMP_FORWARD_IF_NONE => {
                     at_clause_head = false;
                     let next = inst.target.unwrap_or(end);
+                    if private_body_cutoff && pattern.is_some() && next > dispatch_limit {
+                        // A private try bounds this clause's body subwalk,
+                        // not the parent match's next typed clause. Retain
+                        // that body bound while following only the explicit
+                        // mismatch edge and its verified pattern protocol.
+                        if let Some(limit) = self.following_except_clause_end(next) {
+                            dispatch_limit = limit;
+                        }
+                    }
                     clause_offsets.push(inst.offset);
                     pc += 1;
                     // 3.14 pads the clause head with NOT_TAKEN

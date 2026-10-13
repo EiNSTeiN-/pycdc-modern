@@ -62,6 +62,128 @@ def pad_return_values(test, code, count=3):
 
 @unittest.skipUnless(sys.version_info[:2] == (3, 14), 'Requires CPython 3.14')
 class Python314RoundTrip(unittest.TestCase):
+    PRIVATE_CLAUSE_SOURCE = '''async def select(owner):
+    accepted = False
+    for candidate in owner.candidates:
+        try:
+            for value in (candidate, "keeper"):
+                await owner.check(value)
+            accepted = bool(await owner.reconsider(candidate)) or accepted
+        except Incompatible as error:
+            details = "reviewable"
+            if owner.can_close:
+                try:
+                    changed = bool(await owner.close(candidate))
+                    details = "closed" if changed else "terminal"
+                except RuntimeError as inner:
+                    await owner.log("close-failed", str(inner))
+            await owner.log("incompatible", details)
+        except ValueError as error:
+            await owner.log("invalid", str(error))
+            continue
+        except (OSError, asyncio.TimeoutError) as error:
+            await owner.log("transient", str(error))
+            continue
+        except Exception as error:
+            await owner.log("unavailable", str(error))
+            continue
+    await owner.log("finished", accepted)
+    return accepted
+'''
+
+    def private_clause_outcome(self, function, case, asynchronous=True):
+        class Incompatible(ValueError):
+            pass
+        class Owner:
+            def __init__(self):
+                self.candidates = [] if case == 'empty' else ['first', 'second']
+                self.can_close = case != 'no-close'
+                self.events = []
+            def check(self, value):
+                self.events.append(('check', value))
+                if value == 'first':
+                    failures = {'incompatible': Incompatible, 'no-close': Incompatible,
+                        'close-failed': Incompatible, 'terminal': Incompatible,
+                        'log-error': Incompatible, 'invalid': ValueError,
+                        'io': OSError, 'timeout': asyncio.TimeoutError,
+                        'unexpected': LookupError, 'cancel': asyncio.CancelledError}
+                    if case in failures:
+                        raise failures[case]('owned fault')
+            def reconsider(self, candidate):
+                self.events.append(('reconsider', candidate))
+                return True
+            def close(self, candidate):
+                self.events.append(('close', candidate))
+                if case == 'close-failed':
+                    raise RuntimeError('owned close')
+                return case != 'terminal'
+            def log(self, *values):
+                self.events.append(('log', *values))
+                if case == 'log-error' and values[0] == 'incompatible':
+                    raise KeyError('owned log')
+                if case == 'finish-error' and values[0] == 'finished':
+                    raise RuntimeError('owned finish')
+        owner = Owner()
+        if asynchronous:
+            for name in ('check', 'reconsider', 'close', 'log'):
+                operation = getattr(owner, name)
+                async def call(*arguments, operation=operation):
+                    return operation(*arguments)
+                setattr(owner, name, call)
+        from types import SimpleNamespace
+        function.__globals__.update(asyncio=asyncio, Incompatible=Incompatible,
+            faults=SimpleNamespace(incompatible=Incompatible, invalid=ValueError,
+                operating=OSError, timeout=asyncio.TimeoutError, ordinary=Exception))
+        try:
+            value = function(owner)
+            if asynchronous:
+                value = asyncio.run(value)
+            result = ('return', value)
+        except BaseException as error:
+            result = ('error', type(error).__name__, str(error))
+        return result, owner.events
+
+    def check_private_clause_source(self, source, asynchronous=True):
+        original, recovered = self.recover(source)
+        self.assertEqual(original.__code__.co_code, recovered.__code__.co_code)
+        self.assertEqual(original.__code__.co_exceptiontable, recovered.__code__.co_exceptiontable)
+        for case in ('normal', 'empty', 'incompatible', 'no-close', 'close-failed',
+                     'terminal', 'invalid', 'io', 'timeout', 'unexpected', 'cancel',
+                     'log-error', 'finish-error'):
+            with self.subTest(case=case):
+                self.assertEqual(self.private_clause_outcome(original, case, asynchronous),
+                                 self.private_clause_outcome(recovered, case, asynchronous))
+
+    def test_private_handler_try_keeps_later_named_and_tuple_clauses(self):
+        for asynchronous in (False, True):
+            source = self.PRIVATE_CLAUSE_SOURCE
+            if not asynchronous:
+                source = source.replace('async def ', 'def ').replace('await ', '')
+            self.check_private_clause_source(source, asynchronous)
+
+    def test_private_handler_mismatch_edges_accept_attribute_patterns(self):
+        source = self.PRIVATE_CLAUSE_SOURCE
+        for before, after in (('except Incompatible', 'except faults.incompatible'),
+            ('except ValueError', 'except faults.invalid'),
+            ('except (OSError, asyncio.TimeoutError)', 'except (faults.operating, faults.timeout)'),
+            ('except Exception', 'except faults.ordinary')):
+            source = source.replace(before, after)
+        self.check_private_clause_source(source)
+
+    def test_private_handler_single_and_no_private_scope_controls(self):
+        source = self.PRIVATE_CLAUSE_SOURCE
+        single = source[:source.index('        except ValueError')]
+        single += '    await owner.log("finished", accepted)\n    return accepted\n'
+        direct = source.replace('''                try:
+                    changed = bool(await owner.close(candidate))
+                    details = "closed" if changed else "terminal"
+                except RuntimeError as inner:
+                    await owner.log("close-failed", str(inner))''',
+            '''                changed = bool(await owner.close(candidate))
+                details = "closed" if changed else "terminal"''')
+        self.check_private_clause_source(single)
+        self.check_private_clause_source(direct)
+
     def nested_handler_outcome(self, function, case, asynchronous=False):
         class Owner:
             def __init__(self):
