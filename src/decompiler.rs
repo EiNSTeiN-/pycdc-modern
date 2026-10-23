@@ -29057,6 +29057,20 @@ return None;
                 Op::PUSH_NULL => {
                     st.push(self.name_expr("\u{0}null"));
                 }
+                Op::COPY => {
+                    if arg == 0 || arg > st.len() {
+                        return None;
+                    }
+                    st.push(st[st.len() - arg].clone());
+                }
+                Op::SWAP => {
+                    if arg == 0 || arg > st.len() {
+                        return None;
+                    }
+                    let top = st.len() - 1;
+                    let other = st.len() - arg;
+                    st.swap(top, other);
+                }
                 Op::LOAD_ATTR | Op::LOAD_METHOD => {
                     let v = pop1(&mut st);
                     let idx = if ins.op == Op::LOAD_ATTR && self.version.at_least(3, 12) {
@@ -53110,3 +53124,7 @@ impl<'a> Ctx<'a> {
 #[cfg(test)]
 #[path = "decompiler_comparison_tests.rs"]
 mod comparison_tests;
+
+#[cfg(test)]
+#[path = "decompiler_stack_tests.rs"]
+mod stack_tests;
