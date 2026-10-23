@@ -14448,7 +14448,19 @@ impl<'a> Ctx<'a> {
                                     break;
                                 }
                                 Op::CALL if saw_enter_call => {}
-                                Op::CALL => saw_enter_call = true,
+                                Op::CALL => {
+                                    saw_enter_call = true;
+                                    if !is_async {
+                                        // Resume at the as-target's object
+                                        // load (or the consuming store /
+                                        // POP_TOP). An attribute/subscript
+                                        // target evaluates its base AFTER
+                                        // __enter__, so the load must run.
+                                        skip_to =
+                                            self.instrs.get(k + 1).map(|x| x.offset);
+                                        break;
+                                    }
+                                }
                                 Op::STORE_FAST
                                 | Op::STORE_NAME
                                 | Op::STORE_DEREF
@@ -42702,6 +42714,14 @@ fn is_pure_value_op(op: Op) -> bool {
             | Op::BUILD_MAP
             | Op::BUILD_SET
             | Op::BUILD_STRING
+            // container building from constants (`[...]` literals as
+            // genexpr iterables compile to BUILD_LIST; LOAD_CONST;
+            // LIST_EXTEND, and the inline all/any guard scan must see
+            // through it)
+            | Op::LIST_EXTEND
+            | Op::SET_UPDATE
+            | Op::DICT_UPDATE
+            | Op::LIST_TO_TUPLE
             | Op::UNARY_NOT
             | Op::UNARY_NEGATIVE
             | Op::UNARY_POSITIVE
@@ -52842,6 +52862,16 @@ fn genexpr_ternary_merge(
                             operands: vec![l, r],
                             ops: vec![cmp_from_index(idx)],
                         }));
+                    }
+                }
+                Op::SET_FUNCTION_ATTRIBUTE => {
+                    // [attribute value, function] -> [function]. The
+                    // walker only needs the stack shape; defaults /
+                    // closures attached to a nested function are not
+                    // rendered through this path.
+                    if let Some(func) = stack.pop() {
+                        stack.pop();
+                        stack.push(func);
                     }
                 }
                 Op::MAKE_FUNCTION | Op::MAKE_CLOSURE => {

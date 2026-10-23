@@ -21,19 +21,18 @@ for `yield from`, the `SWAP 3; POP_TOP; POP_TOP` loop-return cleanup, the
 constant handling.
 
 On real code compiled with CPython 3.15.0 (pandas + scikit-learn, 2091
-modules), **2089 recompile (99.9%)**. Two shapes remain:
+modules), **all 2091 recompile (100%)**.
 
-- `with ... as <attribute or subscript>` (e.g. `as self.handles`): the
-  as-target/body-return sinking emits `/*with-result*/(None.__enter__)`
-  and flattens the body (pandas `io/stata.py`).
-- `set(<genexpr>)` whose filter contains an inlined `any(...)` guard
-  (sklearn `tests/test_docstring_parameters.py`); the same shape also
-  fails on 3.14 (`set(p for p in xs if any(...))`).
+One 3.15 edge remains outside that corpus: a `with` body whose only
+statement is `return <expr>` (`with c as x: return x`) renders the body as
+`pass` and loses the returned value (the exit protocol is not sunk into
+the body). Attribute and subscript as-targets (`with c as h.attr:`,
+`with c as d[k]:`) are recovered on 3.14 and 3.15.
 
 3.15 的 opcode 表由本机解释器直接生成，2.6–3.15 的行为用例全部通过。
-真实代码（pandas + scikit-learn，2091 模块）中仍有 2 个形态：
-`with ... as <属性/下标>` 的 as 目标/体返回下沉，以及过滤器里内联
-`any(...)` 守卫的 `set(<genexpr>)`；其余 2089 个模块可重编译（99.9%）。
+真实代码（pandas + scikit-learn，2091 模块）**全部 2091 个可重编译（100%）**。
+语料之外仍有一个 3.15 边角：`with` 体只有 `return <expr>` 时
+（`with c as x: return x`）体会渲染成 `pass` 并丢失返回值。
 
 ## try / except / finally
 

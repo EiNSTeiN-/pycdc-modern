@@ -37,10 +37,18 @@ cargo tests, on 14 interpreters (2.6–3.15).
   assignments (`__classdictcell__`, `__static_attributes__`) are stripped
   recursively; and the with success-exit recognizer accepts 3.15's
   common-constant Nones.
+- with as-targets: the sync enter-call scan now resumes at the as-target's
+  object load instead of skipping it, so `with ctx as h.attr:` and
+  `with ctx as d[k]:` recover the target (previously 3.14/3.15 emitted
+  `/*with-result*/(None.__enter__)`).
+- genexp walker: `SET_FUNCTION_ATTRIBUTE` pops the closure tuple, fixing
+  nested `genexpr` closures used as filter calls; `is_pure_value_op`
+  accepts `LIST_EXTEND`/`SET_UPDATE`/`DICT_UPDATE`/`LIST_TO_TUPLE`, so an
+  inline `any([...])` guard inside a comprehension filter is recognized.
 - verification: behavior matrix **663/663 = 100%** (2.6–3.15), stdlib
   corpus 528/528 semantic, real-world corpus 6411/6411. pandas and
-  scikit-learn compiled with 3.15: **2089/2091 (99.9%)** recompile; the
-  two remaining shapes are documented in `docs/LIMITATIONS.md`.
+  scikit-learn compiled with 3.15: **2091/2091 (100%)** recompile. One
+  `with`-body-return edge remains documented in `docs/LIMITATIONS.md`.
 
 ### Community fixes (PRs #1–#26)
 - merged 26 targeted fixes from @EiNSTeiN- covering 3.11–3.14 bytecode
