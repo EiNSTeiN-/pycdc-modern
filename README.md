@@ -103,14 +103,14 @@ seven projects **at its latest release tag**, compiles every `.py` to
 
 | Project (tag) | modules | serial `-j 1` | parallel (default) | recompiles | AST-identical¹ |
 |---|---|---|---|---|---|
-| yt-dlp (2026.08.19) | 1045 | 0.93 s | 0.12 s | **1045/1045** | 500/1045 |
-| matplotlib (v3.11.2) | 253 | 0.47 s | 0.09 s | **253/253** | 59/253 |
-| pandas (v3.0.5) | 1420 | 1.35 s | 0.21 s | 1419/1420 | 582/1420 |
-| django (6.1.1) | 907 | 0.67 s | 0.16 s | **907/907** | 467/907 |
-| sympy (1.14.0) | 1532 | 3.68 s | 1.85 s | **1532/1532** | 479/1532 |
-| scikit-learn (1.9.1) | 671 | 0.71 s | 0.10 s | 669/671 | 216/671 |
-| ansible (v2.21.4) | 583 | 0.35 s | 0.06 s | **583/583** | 185/583 |
-| **total** | **6411** | **8.16 s** | **2.59 s** | **6408/6411 (99.95 %)** | 2488/6411 |
+| yt-dlp (2026.08.19) | 1045 | 0.46 s | 0.08 s | **1045/1045** | 501/1045 |
+| matplotlib (v3.11.2) | 253 | 0.33 s | 0.06 s | **253/253** | 60/253 |
+| pandas (v3.0.5) | 1420 | 0.90 s | 0.14 s | **1420/1420** | 584/1420 |
+| django (6.1.1) | 907 | 0.38 s | 0.10 s | **907/907** | 468/907 |
+| sympy (1.14.0) | 1532 | 3.03 s | 1.63 s | **1532/1532** | 479/1532 |
+| scikit-learn (1.9.1) | 671 | 0.48 s | 0.07 s | **671/671** | 216/671 |
+| ansible (v2.21.4) | 583 | 0.27 s | 0.05 s | **583/583** | 185/583 |
+| **total** | **6411** | **5.85 s** | **2.13 s** | **6411/6411 (100 %)** | 2493/6411 |
 
 ¹ strict: docstring-stripped AST equal to the original source —
 equivalent normalizations (an if/else instead of a ternary, a redundant
@@ -118,10 +118,11 @@ equivalent normalizations (an if/else instead of a ternary, a redundant
 differences, so treat it as a shape-fidelity floor rather than an error
 rate. The parse/recompile column is the acceptance bar.
 
-One pycdc process per project: ~1.0 ms per module serial, peak RSS
-≈99 MB for the whole 6.4 k-module batch. The three remaining modules are one shape: a dict comprehension
-nested inside a generator expression's element (call arguments
-included) — marked incomplete, never a crash. Raw data: [`benchmarks/realworld.json`](benchmarks/realworld.json),
+One pycdc process per project: ~0.9 ms per module serial, peak RSS
+≈81 MB for the whole 6.4 k-module batch. **All 6411 modules recompile**;
+the last family (a dict comprehension nested inside a generator
+expression's element, call arguments included) was closed by the
+community PR batch. Raw data: [`benchmarks/realworld.json`](benchmarks/realworld.json),
 harness: [`tools/bench_realworld.py`](tools/bench_realworld.py).
 
 

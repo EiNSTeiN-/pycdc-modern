@@ -6,6 +6,22 @@ cargo tests, on 13 interpreters (2.6–3.14).
 
 ## Unreleased
 
+### Community fixes (PRs #1–#26)
+- merged 26 targeted fixes from @EiNSTeiN- covering 3.11–3.14 bytecode
+  families: chained assignments and comparison chains; COPY/SWAP and
+  walrus in the bounded expression simulator; keyword calls and ordered
+  `**` expansions; comprehension filter polarity, Boolean elements,
+  nested conditional elements and nested comprehensions inside generator
+  expressions; `for x in await f()` iteration protocol; padded handler
+  returns; EXTENDED_ARG loop back edges; guarded `else` suites; split
+  try/except/else/finally printing; marshalled slice constants vs runtime
+  `slice()` calls; and PEP 649 class-annotation registration gates.
+- the 26 branches and their regression tests were merged and verified
+  together. Three textual conflicts were resolved by keeping both sides:
+  PR #6 stacks on #5, all PRs append tests at the same point in
+  `tests/integration.rs`, and #4/#5/#6/#24 append test-module
+  declarations at the end of `decompiler.rs`.
+
 ### Fixed
 - value-position and-chains in a ternary: `try_dup_tail_ternary` now
   absorbs leading same-target cond jumps into the condition, so
@@ -16,9 +32,9 @@ cargo tests, on 13 interpreters (2.6–3.14).
   merge, so `d[a if c and e else b]` keeps the shared lookup.
 
 ### Benchmarks
-- real-world corpus: 6408/6411 modules recompile (99.95%); pandas is at
-  1419/1420 with only the nested-comprehension family left (sklearn ×2,
-  pandas to_dict)
+- real-world corpus: 6411/6411 modules recompile (100%); the former
+  nested-comprehension family (pandas `to_dict`, sklearn `_logistic`,
+  `pairwise`) is closed, and strict AST equality rises to 2493/6411
 
 
 ### Fixed
