@@ -548,8 +548,7 @@ def call_annotate_function(annotate, format, *, owner=None, _is_evaluate=False):
             if isinstance(result, ForwardRef):
                 return result.evaluate(format=Format.FORWARDREF)
             return result
-        return result.items()
-        val
+        return {key: val.evaluate(format=Format.FORWARDREF) if isinstance(val, ForwardRef) else val for key, val in result.items()}
     if format == Format.VALUE:
         raise RuntimeError('annotate function does not support VALUE format')
     raise ValueError(f'Invalid format: {format!r}')

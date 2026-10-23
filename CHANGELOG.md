@@ -28,10 +28,19 @@ cargo tests, on 14 interpreters (2.6–3.15).
   condition-chain merger accepts LOAD_SMALL_INT/LOAD_COMMON_CONSTANT
   epilogue stubs. The seeded value-region simulator handles 3.15's
   constant args, closing OR chains such as `if A and B: ... elif C or D:`.
+- genexp/with refinements (also fixes 3.14): a computed callable inside a
+  genexpr element no longer mistakes a preceding attribute value for a
+  method receiver (`enet_tol=self.enet_tol, max_iter=int(...)`); a ternary
+  used as a call argument folds at its merge label instead of only at
+  YIELD/LIST_APPEND; the inline tuple/all/any fast-path guard is
+  recognized inside a genexpr element; nested class-body protocol
+  assignments (`__classdictcell__`, `__static_attributes__`) are stripped
+  recursively; and the with success-exit recognizer accepts 3.15's
+  common-constant Nones.
 - verification: behavior matrix **663/663 = 100%** (2.6–3.15), stdlib
   corpus 528/528 semantic, real-world corpus 6411/6411. pandas and
-  scikit-learn compiled with 3.15: 2079/2091 recompile; the 12 remaining
-  shapes are documented in `docs/LIMITATIONS.md`.
+  scikit-learn compiled with 3.15: **2089/2091 (99.9%)** recompile; the
+  two remaining shapes are documented in `docs/LIMITATIONS.md`.
 
 ### Community fixes (PRs #1–#26)
 - merged 26 targeted fixes from @EiNSTeiN- covering 3.11–3.14 bytecode

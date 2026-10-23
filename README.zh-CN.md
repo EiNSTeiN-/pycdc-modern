@@ -131,7 +131,7 @@ RSS ≈81 MB。**6411 个模块全部可重编译**；最后一族（生成器�
 | [`tests/roundtrip.py`](tests/roundtrip.py) | fixture 矩阵：编译 → 反编译 → 重编译 → 严格字节码对比 | 49/54 严格一致（exceptions fixture 仅结构差，语义等价） |
 
 3.15 的结果对应 CPython 3.15.0/3.15.1：内联推导式、调用与 import 的编码
-有变化，opcode 表由本机解释器直接生成。行为用例已全部通过；剩余 12 个真实
+有变化，opcode 表由本机解释器直接生成。行为用例已全部通过；剩余 2 个真实
 模块形态列在 [docs/LIMITATIONS.md](docs/LIMITATIONS.md)。
 
 分版本结果见 `tests/corpus/<version>/report.json`。

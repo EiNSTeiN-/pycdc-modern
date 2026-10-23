@@ -138,7 +138,7 @@ Three independent harnesses, all runnable locally (need pyenv/uv interpreters 2.
 
 The 3.15 result reflects CPython 3.15.0/3.15.1, whose inline-comprehension,
 call and import encodings changed; its opcode table is generated from the
-live interpreter. All behavior cases pass; the 12 remaining real-module
+live interpreter. All behavior cases pass; the 2 remaining real-module
 shapes are listed in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 Per-version results live in `tests/corpus/<version>/report.json`.

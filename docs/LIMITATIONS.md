@@ -21,19 +21,19 @@ for `yield from`, the `SWAP 3; POP_TOP; POP_TOP` loop-return cleanup, the
 constant handling.
 
 On real code compiled with CPython 3.15.0 (pandas + scikit-learn, 2091
-modules), **2079 recompile (99.4%)**. The 12 remaining shapes are
-the 3.15 call/with protocol, never silently wrong code:
+modules), **2089 recompile (99.9%)**. Two shapes remain:
 
-- 8 modules: a `PUSH_NULL` marker (`\x00null`) leaks as a call argument
-  inside a generator expression with nested/keyword calls;
-- 1 module: `/*with-result*/` placeholder in a `with ... as` target;
-- 1 module: `__classdictcell__` protocol local in a class body;
-- 1 module: a callable underflow (`?`) in a complex `any(...)` genexpr;
-- 1 module: a nested `any` guard over multiple filters.
+- `with ... as <attribute or subscript>` (e.g. `as self.handles`): the
+  as-target/body-return sinking emits `/*with-result*/(None.__enter__)`
+  and flattens the body (pandas `io/stata.py`).
+- `set(<genexpr>)` whose filter contains an inlined `any(...)` guard
+  (sklearn `tests/test_docstring_parameters.py`); the same shape also
+  fails on 3.14 (`set(p for p in xs if any(...))`).
 
 3.15 的 opcode 表由本机解释器直接生成，2.6–3.15 的行为用例全部通过。
-真实代码（pandas + scikit-learn，2091 模块）中仍有 12 个 call/with 协议
-形态；其余 2079 个模块可重编译（99.4%）。
+真实代码（pandas + scikit-learn，2091 模块）中仍有 2 个形态：
+`with ... as <属性/下标>` 的 as 目标/体返回下沉，以及过滤器里内联
+`any(...)` 守卫的 `set(<genexpr>)`；其余 2089 个模块可重编译（99.9%）。
 
 ## try / except / finally
 

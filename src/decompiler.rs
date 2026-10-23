@@ -11170,12 +11170,22 @@ impl<'a> Ctx<'a> {
                 k += 1;
                 continue;
             }
-            if x.op == Op::LOAD_CONST
-                && matches!(
+            let is_none = if x.op == Op::LOAD_CONST {
+                matches!(
                     self.code.consts.get(x.arg as usize).map(|o| &**o),
                     Some(PyObject::None)
                 )
-            {
+            } else if x.op == Op::LOAD_COMMON_CONSTANT {
+                // 3.15 emits the three None exit arguments through the
+                // common-constant table (arg 7).
+                matches!(
+                    common_constant_expr(x.arg, self.version).as_deref(),
+                    Some(Expr::Const(o)) if matches!(&**o, PyObject::None)
+                )
+            } else {
+                false
+            };
+            if is_none {
                 nones += 1;
                 k += 1;
                 continue;
@@ -13675,6 +13685,39 @@ use crate::opcode::Op;
 impl<'a> Ctx<'a> {
     /// Execute one instruction. Returns false when the instruction stream
     /// should stop being processed (unconditional exit).
+    /// 3.15 spells the inline with's three None exit arguments as
+    /// LOAD_COMMON_CONSTANT, so the LOAD_CONST arm never starts the
+    /// recognizer. Mirror its closing logic for the common-constant arm.
+    fn try_finish_with_exit_common(&mut self) -> bool {
+        if !self.version.at_least(3, 15) || self.with_exits == 0 {
+            return false;
+        }
+        let Some(after) = self.inline_with_exit_span(self.cur_offset) else {
+            return false;
+        };
+        let nested_end_here = self.with_regions.iter().any(|(k, v)| {
+            *v == self.cur_offset
+                && match (
+                    self.with_region_handlers.get(k).copied(),
+                    self.blocks.last().and_then(|b| b.with_handler),
+                ) {
+                    (Some(rh), Some(th)) => rh != th,
+                    _ => false,
+                }
+        });
+        let top_is_own_with = match self.blocks.last() {
+            Some(b) if b.kind == BlockType::With => !nested_end_here,
+            _ => false,
+        };
+        if top_is_own_with {
+            self.close_with_blocks(self.cur_offset);
+        }
+        if self.skip_until.map_or(true, |s| s < after) {
+            self.skip_until = Some(after);
+        }
+        true
+    }
+
     fn exec(&mut self, inst: &Instruction) -> bool {
         let arg = inst.arg;
         // 3.15 folds GET_YIELD_FROM_ITER into GET_ITER with arg 3;
@@ -14101,6 +14144,9 @@ impl<'a> Ctx<'a> {
                 true
             }
             Op::LOAD_COMMON_CONSTANT => {
+                if self.try_finish_with_exit_common() {
+                    return true;
+                }
                 // 3.14+: arg indexes dis._common_constants =
                 //   [AssertionError, NotImplementedError, tuple, all, any].
                 // all/any (3/4) also drive the inline all/any-genexpr
@@ -49440,6 +49486,50 @@ fn refold_legacy_finally_return(stmts: &mut Vec<Stmt>) {
     }
 }
 
+/// Strip compiler-generated class-body protocol assignments. They are
+/// not source, and a nested class body (methods defined under `if`) emits
+/// them inside the conditional, where the top-level strip misses them
+/// (`__classdictcell__ = /*bad-local-0*/` was a syntax error in 3.15
+/// real-world modules).
+fn strip_class_protocol(stmts: &mut Vec<Stmt>) {
+    stmts.retain(|s| {
+        !matches!(s, Stmt::Assign { targets, .. }
+            if targets.len() == 1
+                && matches!(&*targets[0], Expr::Name(n)
+                    if n == "__classcell__"
+                        || n == "__classdictcell__"
+                        || n == "__classdict__"
+                        || n == "__firstlineno__"
+                        || n == "__static_attributes__"
+                        || n == "__type_params__"))
+    });
+    for s in stmts.iter_mut() {
+        match s {
+            Stmt::If { body, orelse, .. }
+            | Stmt::While { body, orelse, .. }
+            | Stmt::For { body, orelse, .. } => {
+                strip_class_protocol(body);
+                strip_class_protocol(orelse);
+            }
+            Stmt::Try { body, handlers, orelse, finalbody, .. } => {
+                strip_class_protocol(body);
+                for h in handlers.iter_mut() {
+                    strip_class_protocol(&mut h.body);
+                }
+                strip_class_protocol(orelse);
+                strip_class_protocol(finalbody);
+            }
+            Stmt::With { body, .. } => strip_class_protocol(body),
+            Stmt::Match { cases, .. } => {
+                for c in cases.iter_mut() {
+                    strip_class_protocol(&mut c.body);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn postprocess_body(mut body: Vec<Stmt>, code: &CodeObject, version: PythonVersion) -> Vec<Stmt> {
     // PEP 649/749: 3.14+ compilers initialize a module-scope
     // `__conditional_annotations__` set before the `from __future__`
@@ -49452,6 +49542,7 @@ fn postprocess_body(mut body: Vec<Stmt>, code: &CodeObject, version: PythonVersi
             if targets.len() == 1
                 && matches!(&*targets[0], Expr::Name(n) if n == "__conditional_annotations__"))
     });
+    strip_class_protocol(&mut body);
     // 3.6+ evaluates module/class-body annotations into the scope's
     // `__annotations__` dict (`x: T = v` -> STORE x; T; LOAD
     // __annotations__; LOAD 'x'; STORE_SUBSCR). The walk renders these
@@ -51619,6 +51710,7 @@ fn comp_arm_value_op(o: Op) -> bool {
             | Op::CALL_FUNCTION
             | Op::CALL_METHOD
             | Op::CALL_FUNCTION_KW
+            | Op::CALL_KW
             | Op::CALL_FUNCTION_EX
             | Op::CALL_INTRINSIC_1
             | Op::CALL_INTRINSIC_2
@@ -51844,12 +51936,35 @@ fn genexpr_ternary_merge(
         // outer-first and combine inner-first at the producer.
         // tern_chain_t tracks the else-arm target of the and-chain whose
         // links are being merged into the LAST pushed cond
-        let mut tern_conds: Vec<ExprRef> = Vec::new();
+        // (merge offset, condition): a ternary used as a call argument
+        // merges BEFORE the CALL, so the fold is keyed by offset instead
+        // of waiting for YIELD/LIST_APPEND.
+        let mut tern_conds: Vec<(usize, ExprRef)> = Vec::new();
+        // 3.14+ inline tuple/all/any/list/set fast-path guard: skip the
+        // fast path and resume at its slow path.
+        let mut skip_until = 0usize;
         let mut tern_chain_t: Option<usize> = None;
         // first operand of a filter or-chain awaiting its partner (see
         // the cond-jump arm)
         let mut pending_or_filter: Option<ExprRef> = None;
         for (ii, inst) in instrs.iter().enumerate() {
+            // Fold a pending ternary as soon as its merge label is
+            // reached. This is required when the ternary is a call
+            // argument: CALL/CALL_KW consumes the arms before the
+            // element producer would fold them.
+            while matches!(tern_conds.last(), Some((m, _)) if *m == inst.offset) {
+                let (_, tc) = tern_conds.pop().unwrap();
+                let else_v = stack.pop().unwrap_or_else(|| Rc::new(Expr::Name("?".to_string())));
+                let then_v = stack.pop().unwrap_or_else(|| Rc::new(Expr::Name("?".to_string())));
+                stack.push(Rc::new(Expr::Ternary {
+                    cond: tc,
+                    then_expr: then_v,
+                    else_expr: else_v,
+                }));
+            }
+            if inst.offset < skip_until {
+                continue;
+            }
             let prev = prev_inst.replace((inst.op, inst.arg));
             // walrus inside a comprehension: DUP_TOP (<=3.10) / COPY 1
             // (3.11+) then a non-loop store; both duplicated slots fold
@@ -52036,6 +52151,47 @@ fn genexpr_ternary_merge(
                         inst.arg as usize
                     };
                     let n = name_of_arg(code, idx);
+                    // 3.14+ inline `tuple/all/any/list/set(<genexpr>)`
+                    // fast path: LOAD_GLOBAL name; COPY 1;
+                    // LOAD_COMMON_CONSTANT name; IS_OP; PJIF slow.
+                    if self.version.at_least(3, 14) {
+                        let guard = match (
+                            instrs.get(ii + 1),
+                            instrs.get(ii + 2),
+                            instrs.get(ii + 3),
+                            instrs.get(ii + 4),
+                        ) {
+                            (Some(c), Some(k), Some(iop), Some(pj))
+                                if c.op == Op::COPY
+                                    && c.arg == 1
+                                    && k.op == Op::LOAD_COMMON_CONSTANT
+                                    && iop.op == Op::IS_OP
+                                    && iop.arg == 0
+                                    && matches!(
+                                        pj.op,
+                                        Op::POP_JUMP_IF_FALSE
+                                            | Op::POP_JUMP_FORWARD_IF_FALSE
+                                    ) =>
+                            {
+                                matches!(
+                                    (k.arg, n.as_str()),
+                                    (2, "tuple")
+                                        | (3, "all")
+                                        | (4, "any")
+                                        | (5, "list")
+                                        | (6, "set")
+                                )
+                                .then(|| pj.target)
+                                .flatten()
+                            }
+                            _ => None,
+                        };
+                        if let Some(t) = guard {
+                            if t > inst.offset {
+                                skip_until = t;
+                            }
+                        }
+                    }
                     stack.push(Rc::new(Expr::Name(n)));
                 }
                 Op::LOAD_ATTR | Op::LOAD_METHOD => {
@@ -52217,11 +52373,11 @@ fn genexpr_ternary_merge(
                             };
                             if tern_chain_t == Some(t_off) {
                                 // continuation link of the same and-chain
-                                if let Some(prev) = tern_conds.last().cloned() {
+                                if let Some((_, prev)) = tern_conds.last().cloned() {
                                     let mut vals = Vec::new();
                                     flatten_boolop(prev, BoolOpKind::And, &mut vals);
                                     flatten_boolop(cj, BoolOpKind::And, &mut vals);
-                                    if let Some(lastc) = tern_conds.last_mut() {
+                                    if let Some((_, lastc)) = tern_conds.last_mut() {
                                         *lastc = Rc::new(Expr::BoolOp {
                                             op: BoolOpKind::And,
                                             values: vals,
@@ -52229,10 +52385,9 @@ fn genexpr_ternary_merge(
                                     }
                                 }
                             } else {
-                                tern_conds.push(cj);
+                                tern_conds.push((m_off, cj));
                                 tern_chain_t = Some(t_off);
                             }
-                            let _ = m_off;
                             continue;
                         }
                         tern_chain_t = None;
@@ -52428,7 +52583,7 @@ fn genexpr_ternary_merge(
                         }
                     }
                     while stack.len() >= 2 {
-                        let Some(tc) = tern_conds.pop() else { break };
+                        let Some((_, tc)) = tern_conds.pop() else { break };
                         let else_v = stack.pop().unwrap();
                         let then_v = stack.pop().unwrap();
                         stack.push(Rc::new(Expr::Ternary {
@@ -52472,7 +52627,7 @@ fn genexpr_ternary_merge(
                         }
                     }
                     while stack.len() >= 2 {
-                        let Some(tc) = tern_conds.pop() else { break };
+                        let Some((_, tc)) = tern_conds.pop() else { break };
                         let else_v = stack.pop().unwrap();
                         let then_v = stack.pop().unwrap();
                         stack.push(Rc::new(Expr::Ternary {
@@ -52939,9 +53094,14 @@ fn genexpr_ternary_merge(
                         // genexp rendered `cls(c)` — the receiver popped
                         // as the func — instead of
                         // `cls.__subclasscheck__(c)`)
-                        if stack.len() >= 2
-                            && matches!(&*stack[stack.len() - 2], Expr::Attribute { .. })
-                        {
+                        let method_receiver = stack.len() >= 2
+                            && match (&*stack[stack.len() - 2], stack.last()) {
+                                (Expr::Attribute { value, .. }, Some(top)) => {
+                                    expr_eq(value, top)
+                                }
+                                _ => false,
+                            };
+                        if method_receiver {
                             stack.pop(); // receiver marker
                             stack.pop().unwrap_or_else(underflow)
                         } else {
