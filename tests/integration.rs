@@ -253,3 +253,29 @@ fn sequential_generator_handlers_keep_the_shared_mainline() {
         assert!(!src.contains("else:"), "Python {version}: spurious handler else:\n{src}");
     }
 }
+
+#[test]
+fn empty_defaults_keep_the_comprehension_level() {
+    // PEP 709 inlining starts in 3.12; retain the 3.11 compatibility case.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("comprehension_default_arguments.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for (name, expression) in [
+            ("list_default", "[field for row in rows for field in row.get('values', [])]"),
+            ("set_default", "{field for row in rows for field in row.get('values', {})}"),
+            ("dict_default", "{field: len(field) for row in rows for field in row.get('values', {})}"),
+            ("nested_list", "[[field for field in row.get('values', [])] for row in rows]"),
+            ("nested_set", "[{field for field in row.get('values', {})} for row in rows]"),
+            ("nested_dict", "[{field: len(field) for field in row.get('values', {})} for row in rows]"),
+            ("subscript", "[field for row in rows for field in row['values']]"),
+            ("no_default", "[field for row in rows for field in row.get('values')]"),
+            ("tuple_default", "[field for row in rows for field in row.get('values', ())]"),
+        ] {
+            let expected = format!(
+                "def {name}(rows):\n    row = 'saved-row'\n    field = 'saved-field'\n    result = {expression}\n    return result, row, field");
+            assert_contains(&src, &[&expected], version);
+        }
+    }
+}
+    }
+}
