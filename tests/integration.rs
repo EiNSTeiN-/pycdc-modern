@@ -237,3 +237,19 @@ fn py314_hello() {
         "py3.14 hello",
     );
 }
+
+#[test]
+fn sequential_generator_handlers_keep_the_shared_mainline() {
+    // CALL_INTRINSIC_1 3 starts in 3.12; 3.11 has no frame-wide handler.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(
+            &format!("sequential_generator_handlers.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        let body = "    try:\n        yield work('first')\n    except ValueError:\n        yield 2\n    yield 3\n    try:\n        yield work('last')\n    except KeyError:\n        yield 5\n    yield 6";
+        for definition in ["def synchronous(work):", "async def asynchronous(work):"] {
+            let expected = format!("{definition}\n{body}");
+            assert_contains(&src, &[&expected], version);
+        }
+        assert!(!src.contains("else:"), "Python {version}: spurious handler else:\n{src}");
+    }
+}
