@@ -21174,7 +21174,10 @@ let reopen = self
             let group = std::mem::take(&mut self.pending_stores);
             self.last_store_line = None;
             self.pending_unpack_wrap.clear();
-            let all_same = group.windows(2).all(|w| expr_eq(&w[0].1, &w[1].1));
+            // COPY/DUP preserves the identity of one evaluated stack value.
+            // Structurally equal expressions can be independent evaluations:
+            // `left, right = read(), read()` must still call read twice.
+            let all_same = group.windows(2).all(|w| Rc::ptr_eq(&w[0].1, &w[1].1));
             if all_same {
                 let value = group[0].1.clone();
                 let targets: Vec<ExprRef> = group.iter().map(|(t, _)| t.clone()).collect();
