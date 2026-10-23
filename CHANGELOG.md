@@ -22,8 +22,14 @@ cargo tests, on 14 interpreters (2.6–3.15).
 - PEP 649/749: strip the compiler's module-scope
   `__conditional_annotations__ = set()` prologue (3.14+) so
   `from __future__ import ...` stays at the top of the file.
-- verification: behavior matrix 659/663 (all 2.6–3.14 pass; 3.15: 67/71),
-  stdlib corpus 528/528 semantic, real-world corpus 6411/6411. pandas and
+- handler-loop returns: 3.15 closes them with
+  `SWAP 3; POP_TOP; POP_TOP; SWAP 2; POP_EXCEPT; RETURN_VALUE`; the
+  return-cleanup scan now looks through POP_EXCEPT, and the forward
+  condition-chain merger accepts LOAD_SMALL_INT/LOAD_COMMON_CONSTANT
+  epilogue stubs. The seeded value-region simulator handles 3.15's
+  constant args, closing OR chains such as `if A and B: ... elif C or D:`.
+- verification: behavior matrix **663/663 = 100%** (2.6–3.15), stdlib
+  corpus 528/528 semantic, real-world corpus 6411/6411. pandas and
   scikit-learn compiled with 3.15: 2079/2091 recompile; the 12 remaining
   shapes are documented in `docs/LIMITATIONS.md`.
 

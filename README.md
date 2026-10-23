@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-2.0--3.15-yellow.svg)](#)
 [![Corpus](https://img.shields.io/badge/corpus-528%2F528%20semantic-brightgreen.svg)](#verification)
-[![Behavior](https://img.shields.io/badge/behavior-659%2F663-brightgreen.svg)](#verification)
+[![Behavior](https://img.shields.io/badge/behavior-663%2F663-brightgreen.svg)](#verification)
 [![Built with ZCode](https://img.shields.io/badge/Built%20with%20ZCode-000000.svg?style=flat&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMTgiIGhlaWdodD0iMTAwIiB2aWV3Qm94PSIwIDAgMjU2IDIxOCI+PHBhdGggZmlsbD0iI2ZmZmZmZiIgZD0iTTEzNC40IDAuMTMwMTUyTDExNi40OCAyNS42MDIyQzExMy42NjUgMjkuNTY5OSAxMDkuMDU0IDMyLjAwMTkgMTA0LjA2NCAzMi4wMDE5SDYuMzk5OVYwQzYuMzk5OSAwLjEzMDE0OSAxMzQuNCAwLjEzMDE1MiAxMzQuNCAwLjEzMDE1MloiLz48cGF0aCBmaWxsPSIjZmZmZmZmIiBkPSJNMjU2IDAuMTMwMTI3TDEwMi40MDEgMjE3LjczMkgwTDE1My41OTkgMC4xMzAxMjdIMjU2WiIvPjxwYXRoIGZpbGw9IiNmZmZmZmYiIGQ9Ik0xMjEuNjAxIDIxNy43MzJMMTM5LjY1IDE5Mi4xMzRDMTQyLjQ2NSAxODguMTY2IDE0Ny4wNzYgMTg1LjczNCAxNTIuMDY3IDE4NS43MzRIMjQ5LjYwNFYyMTcuNzM2SDEyMS42MDFWMjE3LjczMloiLz48L3N2Zz4=)](https://zcode.z.ai/)
 
 Decompile and disassemble Python bytecode (`.pyc`) from **Python 2.0 through 3.15** back into readable source — written in Rust, three dependencies, no Python required at runtime.
@@ -18,7 +18,7 @@ pycdas program.pyc         # disassemble (exception tables, line numbers, nested
 ## Highlights
 
 - **100% semantic equivalence** on a 528-module real-stdlib corpus across 14 interpreters (2.6–3.15); 76.9% are signature-exact
-- **Behavior matrix 659/663**: every case on 2.6–3.14 passes; 3.15 is at 67/71 with four documented gaps
+- **Behavior matrix 663/663 = 100%**: every case passes on 2.6–3.15, including the new 3.15 bytecode encodings
 - Modern syntax: PEP 695/696 type parameters, PEP 750 t-strings, PEP 649 deferred annotations, match/case, walrus, async, f-strings
 - Version differences are pure data: one embedded opcode table per release, overridable via `--opcodes`
 - Graceful degradation: unrecognized constructs become comment placeholders — never a crash
@@ -133,12 +133,12 @@ Three independent harnesses, all runnable locally (need pyenv/uv interpreters 2.
 | Harness | What it proves | Current |
 |---|---|---|
 | [`tools/verify_corpus.py`](tools/verify_corpus.py) | 528 stdlib modules: decompile → recompile with the *same* interpreter → compare bytecode signatures, fall back to normalized-AST diff | **528/528 semantic** (406 signature-exact, 0 syntax errors, 0 placeholders) |
-| [`tools/run_behavior.py`](tools/run_behavior.py) | 72 behavior cases × 14 interpreters: run original vs decompiled, compare stdout + exit code | **659/663 = 99.4%** (all 2.6–3.14 pass; 3.15: 67/71) |
+| [`tools/run_behavior.py`](tools/run_behavior.py) | 72 behavior cases × 14 interpreters: run original vs decompiled, compare stdout + exit code | **663/663 = 100%** (2.6–3.15) |
 | [`tests/roundtrip.py`](tests/roundtrip.py) | fixture matrix: compile → decompile → recompile → strict bytecode compare | 49/54 strict (exceptions fixtures differ structurally, semantically equivalent) |
 
 The 3.15 result reflects CPython 3.15.0/3.15.1, whose inline-comprehension,
 call and import encodings changed; its opcode table is generated from the
-live interpreter. The four remaining behavior shapes and the 12 real-module
+live interpreter. All behavior cases pass; the 12 remaining real-module
 shapes are listed in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 Per-version results live in `tests/corpus/<version>/report.json`.

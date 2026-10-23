@@ -24466,6 +24466,20 @@ impl<'a> Ctx<'a> {
                         }),
                     )));
                 }
+                Op::LOAD_COMMON_CONSTANT => {
+                    // Only the 3.15 constant values (None/''/True/False/-1)
+                    // participate in condition regions. The builtin-name
+                    // args (tuple/all/any/list/set) belong to the inline
+                    // guard fast path and must keep failing this simulator
+                    // so that path is not re-associated.
+                    if !self.version.at_least(3, 15) || !(7..=11).contains(&ins.arg) {
+                        return None;
+                    }
+                    match common_constant_expr(ins.arg, self.version) {
+                        Some(value) => st.push(value),
+                        None => st.push(self.name_expr("???")),
+                    }
+                }
                 Op::LOAD_ATTR | Op::LOAD_METHOD => {
                     let v = pop1(&mut st);
                     let idx = if ins.op == Op::LOAD_ATTR && self.version.at_least(3, 12) {
@@ -24937,7 +24951,10 @@ impl<'a> Ctx<'a> {
                         .map_or(false, |&xi| {
                             matches!(
                                 self.instrs[xi].op,
-                                Op::LOAD_CONST | Op::RETURN_CONST
+                                Op::LOAD_CONST
+                                    | Op::LOAD_SMALL_INT
+                                    | Op::LOAD_COMMON_CONSTANT
+                                    | Op::RETURN_CONST
                             ) && (matches!(
                                 self.instrs.get(xi + 1).map(|x| x.op),
                                 Some(Op::RETURN_VALUE) | Some(Op::RETURN_CONST)
@@ -43047,10 +43064,11 @@ impl<'a> Ctx<'a> {
                         return true;
                     }
                     if fwd >= 4
-                        || !matches!(
+                        || (!matches!(
                             nx.op,
                             Op::POP_TOP | Op::SWAP | Op::ROT_TWO | Op::NOP | Op::NOT_TAKEN
-                        )
+                        ) && !(self.version.at_least(3, 15)
+                            && nx.op == Op::POP_EXCEPT))
                     {
                         return false;
                     }
@@ -43085,7 +43103,14 @@ impl<'a> Ctx<'a> {
                                 | Op::NOT_TAKEN
                         ) || steps >= 8
                         {
-                            return false;
+                            // 3.15 handler loops end
+                            // SWAP 3; POP_TOP; POP_TOP; SWAP 2;
+                            // POP_EXCEPT; RETURN_VALUE
+                            if !(self.version.at_least(3, 15)
+                                && nx.op == Op::POP_EXCEPT)
+                            {
+                                return false;
+                            }
                         }
                         k += 1;
                         steps += 1;
