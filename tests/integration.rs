@@ -277,5 +277,3 @@ fn empty_defaults_keep_the_comprehension_level() {
         }
     }
 }
-    }
-}

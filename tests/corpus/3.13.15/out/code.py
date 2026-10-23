@@ -108,7 +108,7 @@ class InteractiveInterpreter:
             source = kwargs.pop('source', '')
             self._showtraceback(typ, value, None, source)
         finally:
-            value = tb = (typ := None)
+            typ = value = tb = None
 
     def showtraceback(self):
         '''Display the exception that just occurred.
@@ -123,7 +123,7 @@ class InteractiveInterpreter:
             typ, value, tb = sys.exc_info()
             self._showtraceback(typ, value, tb.tb_next, '')
         finally:
-            value = tb = (typ := None)
+            typ = value = tb = None
 
     def _showtraceback(self, typ, value, tb, source):
         sys.last_type = typ
