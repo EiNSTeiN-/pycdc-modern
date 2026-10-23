@@ -4,11 +4,11 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-2.0--3.15-yellow.svg)](#)
-[![Corpus](https://img.shields.io/badge/corpus-520%2F520%20semantic-brightgreen.svg)](#验证)
-[![Behavior](https://img.shields.io/badge/behavior-516%2F516-brightgreen.svg)](#验证)
+[![Corpus](https://img.shields.io/badge/corpus-528%2F528%20semantic-brightgreen.svg)](#验证)
+[![Behavior](https://img.shields.io/badge/behavior-659%2F663-brightgreen.svg)](#验证)
 [![Built with ZCode](https://img.shields.io/badge/Built%20with%20ZCode-000000.svg?style=flat&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMTgiIGhlaWdodD0iMTAwIiB2aWV3Qm94PSIwIDAgMjU2IDIxOCI+PHBhdGggZmlsbD0iI2ZmZmZmZiIgZD0iTTEzNC40IDAuMTMwMTUyTDExNi40OCAyNS42MDIyQzExMy42NjUgMjkuNTY5OSAxMDkuMDU0IDMyLjAwMTkgMTA0LjA2NCAzMi4wMDE5SDYuMzk5OVYwQzYuMzk5OSAwLjEzMDE0OSAxMzQuNCAwLjEzMDE1MiAxMzQuNCAwLjEzMDE1MloiLz48cGF0aCBmaWxsPSIjZmZmZmZmIiBkPSJNMjU2IDAuMTMwMTI3TDEwMi40MDEgMjE3LjczMkgwTDE1My41OTkgMC4xMzAxMjdIMjU2WiIvPjxwYXRoIGZpbGw9IiNmZmZmZmYiIGQ9Ik0xMjEuNjAxIDIxNy43MzJMMTM5LjY1IDE5Mi4xMzRDMTQyLjQ2NSAxODguMTY2IDE0Ny4wNzYgMTg1LjczNCAxNTIuMDY3IDE4NS43MzRIMjQ5LjYwNFYyMTcuNzM2SDEyMS42MDFWMjE3LjczMloiLz48L3N2Zz4=)](https://zcode.z.ai/)
 
-用 Rust 编写的 Python 字节码反编译器与反汇编器：把 **Python 2.0 – 3.15（dev）** 的 `.pyc` 还原为可读源码。仅三个依赖，运行不需要 Python。
+用 Rust 编写的 Python 字节码反编译器与反汇编器：把 **Python 2.0 – 3.15** 的 `.pyc` 还原为可读源码。仅三个依赖，运行不需要 Python。
 
 ```sh
 pycdc program.pyc          # 反编译到标准输出
@@ -17,8 +17,8 @@ pycdas program.pyc         # 反汇编（异常表、行号、嵌套 code object
 
 ## 亮点
 
-- 13 个解释器（2.6–3.14）、520 个真实标准库模块语料上**语义等价 100%**，其中 76.5% 达到字节码签名级完全一致
-- **行为矩阵 516/516**：反编译产物与原码在同一解释器下运行结果一致
+- 14 个解释器（2.6–3.15）、528 个真实标准库模块语料上**语义等价 100%**，其中 76.9% 达到字节码签名级完全一致
+- **行为矩阵 659/663**：2.6–3.14 全部通过；3.15 为 67/71，4 个已记录缺口
 - 现代语法：PEP 695/696 类型参数、PEP 750 t-string、PEP 649 延迟注解、match/case、海象运算符、async、f-string
 - 版本差异全部数据化：每版本一张内嵌 opcode 表，`--opcodes` 可外部覆盖
 - 优雅降级：无法识别的构造输出注释占位，绝不崩溃
@@ -122,13 +122,17 @@ RSS ≈81 MB。**6411 个模块全部可重编译**；最后一族（生成器�
 
 ## 验证
 
-三套可本地复跑的验证设施（需 pyenv/uv 安装 2.6–3.14 解释器）：
+三套可本地复跑的验证设施（需 pyenv/uv 安装 2.6–3.15 解释器）：
 
 | 设施 | 验证内容 | 当前结果 |
 |---|---|---|
-| [`tools/verify_corpus.py`](tools/verify_corpus.py) | 520 个标准库模块：反编译 → **同版本解释器**重编译 → 结构化字节码签名对比，不一致再做归一化 AST 语义对比 | **520/520 语义等价**（398 签名级一致，零语法错误、零占位符） |
-| [`tools/run_behavior.py`](tools/run_behavior.py) | 50 用例 × 13 解释器：原始与反编译代码同解释器运行，对比 stdout+返回码 | **516/516 = 100%** |
+| [`tools/verify_corpus.py`](tools/verify_corpus.py) | 528 个标准库模块：反编译 → **同版本解释器**重编译 → 结构化字节码签名对比，不一致再做归一化 AST 语义对比 | **528/528 语义等价**（406 签名级一致，零语法错误、零占位符） |
+| [`tools/run_behavior.py`](tools/run_behavior.py) | 72 用例 × 14 解释器：原始与反编译代码同解释器运行，对比 stdout+返回码 | **659/663 = 99.4%**（2.6–3.14 全过；3.15 67/71） |
 | [`tests/roundtrip.py`](tests/roundtrip.py) | fixture 矩阵：编译 → 反编译 → 重编译 → 严格字节码对比 | 49/54 严格一致（exceptions fixture 仅结构差，语义等价） |
+
+3.15 的结果对应 CPython 3.15.0/3.15.1：内联推导式、调用与 import 的编码
+有变化，opcode 表由本机解释器直接生成。剩余 4 个行为用例形态和 12 个真实
+模块形态列在 [docs/LIMITATIONS.md](docs/LIMITATIONS.md)。
 
 分版本结果见 `tests/corpus/<version>/report.json`。
 跨工具对比（与 Decompyle++、uncompyle6、decompyle3 的速度、内存、

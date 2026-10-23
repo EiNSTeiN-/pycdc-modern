@@ -13,21 +13,27 @@ import dis
 
 def cache_entries():
     """{opcode_byte: n_cache_words} for opcodes followed by CACHE entries (3.11+)."""
+    from collections.abc import Mapping
+
     result = {}
     ice = getattr(op, "_inline_cache_entries", None)
-    if isinstance(ice, dict):  # 3.13: {name: count}
+    # 3.13+ uses a mapping {name: count}; 3.15 exposes it as a frozendict,
+    # which is not a dict subclass, so check Mapping rather than dict.
+    if isinstance(ice, Mapping):
         for name, n in ice.items():
             if n and name in op.opmap:
-                result[op.opmap[name]] = n
+                result[op.opmap[name]] = int(n)
     elif ice:  # 3.11 / 3.12: list indexed by opcode
         for i, n in enumerate(ice):
             if n:
-                result[i] = n
-    elif hasattr(op, "_cache_format"):  # 3.13+: {name: [(field, size), ...]}
-        for name, fields in op._cache_format.items():
-            n = sum(size for _, size in fields)
-            if n and name in op.opmap:
-                result[op.opmap[name]] = n
+                result[i] = int(n)
+    else:
+        fmt = getattr(op, "_cache_format", None)
+        if isinstance(fmt, Mapping):  # 3.13+: {name: [(field, size), ...]}
+            for name, fields in fmt.items():
+                n = sum(size for _, size in fields)
+                if n and name in op.opmap:
+                    result[op.opmap[name]] = int(n)
     return result
 
 

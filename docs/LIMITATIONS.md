@@ -1,13 +1,49 @@
 # Known limitations / 已知限制
 
-Detailed gap list as of v0.4.0. Headline numbers: corpus **520/520 semantic**
-(zero syntax errors, zero placeholders), behavior matrix **490/490**.
+Detailed gap list as of 2026-10-23. Headline numbers: stdlib corpus
+**528/528 semantic** (zero syntax errors, zero placeholders), behavior
+matrix **659/663** (every case on 2.6–3.14 passes; 3.15 is 67/71).
 Everything below is either (a) a rare shape that stays semantically
-equivalent, or (b) a corner with no occurrence in the 520-module corpus.
+equivalent, or (b) a corner with no occurrence in the corpus.
 
-截至 v0.4.0 的完整缺口清单。总体：语料 **520/520 语义等价**（零语法错误、
-零占位符），行为矩阵 **490/490**。以下条目要么 (a) 罕见形状但语义仍等价，
-要么 (b) 520 模块语料中零触发的边角。
+截至 2026-10-23 的完整缺口清单。总体：标准库语料 **528/528 语义等价**
+（零语法错误、零占位符），行为矩阵 **659/663**（2.6–3.14 全部通过；
+3.15 为 67/71）。以下条目要么 (a) 罕见形状但语义仍等价，要么 (b) 语料中
+零触发的边角。
+
+## Python 3.15 (2026-10, current stable)
+
+3.15's opcode table is generated from the live interpreter and the
+2.6–3.14 behavior cases are unaffected. Four behavior cases still differ,
+all emitted as visible syntax errors or marked-incomplete output:
+
+- `elif` with an `or` chain after an `and` chain with side-effecting calls
+  (`if t(a) and t(b): ... elif t(c) or t(d): ...`) — the second link is
+  emitted as nested `if`s.
+- an OR of two chained comparisons that share slice operands
+  (`if s[:1] == "'" == s[-1:] or s[:1] == '"' == s[-1:]:`).
+- a `return <expr>` inside a handler's `for` loop (3.15 cleanup is
+  `SWAP 3; POP_TOP; POP_TOP; SWAP 2; POP_EXCEPT; RETURN_VALUE`; the
+  expression is emitted as a statement and the `return` loses it).
+- a literal-pattern `match` lowered to an `if` chain loses the subject
+  after the first case (`case True` works; `case False`/`None` compare
+  `None` instead of `v`).
+
+On real code compiled with CPython 3.15.0 (pandas + scikit-learn,
+2091 modules), **2079 recompile (99.4%)**. The 12 remaining shapes are
+the 3.15 call/with protocol, never silently wrong code:
+
+- 8 modules: a `PUSH_NULL` marker (`\x00null`) leaks as a call argument
+  inside a generator expression with nested/keyword calls;
+- 1 module: `/*with-result*/` placeholder in a `with ... as` target;
+- 1 module: `__classdictcell__` protocol local in a class body;
+- 1 module: a callable underflow (`?`) in a complex `any(...)` genexpr;
+- 1 module: a nested `any` guard over multiple filters.
+
+3.15 的 opcode 表由本机解释器直接生成，2.6–3.14 的行为用例不受影响。
+仍有 4 个行为用例不一致（均为可见的语法错误或标记为不完整，不会静默
+出错），以及真实代码（pandas + scikit-learn，2091 模块）中 12 个
+call/with 协议形态；其余 2079 个模块可重编译（99.4%）。
 
 ## try / except / finally
 

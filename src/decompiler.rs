@@ -13677,7 +13677,17 @@ impl<'a> Ctx<'a> {
     /// should stop being processed (unconditional exit).
     fn exec(&mut self, inst: &Instruction) -> bool {
         let arg = inst.arg;
-        let cont = match inst.op {
+        // 3.15 folds GET_YIELD_FROM_ITER into GET_ITER with arg 3;
+        // normalize so the delegation-protocol arm handles it.
+        let dispatch_op = if self.version.at_least(3, 15)
+            && inst.op == Op::GET_ITER
+            && inst.arg == 3
+        {
+            Op::GET_YIELD_FROM_ITER
+        } else {
+            inst.op
+        };
+        let cont = match dispatch_op {
             // ---------- no-ops / housekeeping ----------
             Op::NOP
             | Op::CACHE
@@ -14106,9 +14116,13 @@ impl<'a> Ctx<'a> {
                 // (_osx_support 3.14 _get_system_version_tuple: walking
                 // the fast path hit CALL_INTRINSIC_1 LIST_TO_TUPLE
                 // unclean; the slow path renders the plain call)
-                if (arg == 2 || arg == 3 || arg == 4)
-                    && self.version.at_least(3, 14)
-                {
+                // 3.15 adds list (5) and set (6) to the same guard family.
+                if matches!(arg, 2 | 3 | 4 | 5 | 6) && self.version.at_least(3, 14) {
+                    if arg >= 5 && !self.version.at_least(3, 15) {
+                        self.mark_unclean();
+                        self.push(Rc::new(Expr::Const(Rc::new(PyObject::None))));
+                        return true;
+                    }
                     if let Some(slow) = self.inline_all_any_slow_path(arg == 3) {
                         // drop the COPY 1 duplicate; the slow path expects
                         // just the callable
@@ -14117,10 +14131,8 @@ impl<'a> Ctx<'a> {
                         return true;
                     }
                 }
-                const COMMON: [&str; 5] =
-                    ["AssertionError", "NotImplementedError", "tuple", "all", "any"];
-                match COMMON.get(arg as usize) {
-                    Some(name) => self.push(self.name_expr(*name)),
+                match common_constant_expr(arg, self.version) {
+                    Some(value) => self.push(value),
                     None => {
                         self.mark_unclean();
                         self.push(Rc::new(Expr::Const(Rc::new(PyObject::None))));
@@ -15397,7 +15409,15 @@ impl<'a> Ctx<'a> {
                     Expr::Const(o) => o.as_int().unwrap_or(0).max(0) as u32,
                     _ => 0,
                 };
-                let module = self.const_name(arg as usize);
+                // 3.15 packs two low flag bits into IMPORT_NAME's operand:
+                // the name index is `arg >> 2` (0 -> functools, 12 -> mod,
+                // 28 -> os in co_names).
+                let name_idx = if self.version.at_least(3, 15) {
+                    (arg >> 2) as usize
+                } else {
+                    arg as usize
+                };
+                let module = self.const_name(name_idx);
                 let fromlist = match &*fromlist {
                     Expr::Const(o) if matches!(&**o, PyObject::None) => None,
                     other => Some(Rc::new(other.clone()) as ExprRef),
@@ -21365,7 +21385,10 @@ impl<'a> Ctx<'a> {
             k += 1;
         }
         let c0 = call0?;
-        if !saw_get_iter {
+        // 3.15 moves GET_ITER into the <genexpr> code object, so the
+        // caller's slow-path call is `... <iterable>; CALL 0; CALL 1`
+        // with no GET_ITER.
+        if !saw_get_iter && !self.version.at_least(3, 15) {
             return None;
         }
         if self.instrs.get(c0 + 1).map(|x| (x.op, x.arg)) != Some((Op::CALL, 1)) {
@@ -29106,7 +29129,10 @@ return None;
                     )));
                 }
                 Op::LOAD_COMMON_CONSTANT => {
-                    st.push(self.name_expr(format!("<const{}>", ins.arg)));
+                    match common_constant_expr(ins.arg, self.version) {
+                        Some(value) => st.push(value),
+                        None => st.push(self.name_expr(format!("<const{}>", ins.arg))),
+                    }
                 }
                 Op::PUSH_NULL => {
                     st.push(self.name_expr("\u{0}null"));
@@ -42826,6 +42852,56 @@ fn cmp_from_index(idx: usize) -> CmpOp {
     }
 }
 
+thread_local! {
+    /// 3.15's `LOAD_COMMON_CONSTANT` materializes values that 3.14 keeps in
+    /// `co_consts`. Reuse one Expr per argument so identity-sensitive merge
+    /// logic sees the same object across loads, matching `LOAD_CONST`.
+    static COMMON_CONST_CACHE: std::cell::RefCell<HashMap<u32, ExprRef>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// `LOAD_COMMON_CONSTANT` argument -> expression (3.14+).
+/// 3.14: [AssertionError, NotImplementedError, tuple, all, any].
+/// 3.15 appends [list, set, None, '', True, False, -1]; the last five
+/// are real constants, not builtin names.
+fn common_constant_expr(arg: u32, version: PythonVersion) -> Option<ExprRef> {
+    let name = |n: &str| Rc::new(Expr::Name(n.to_string()));
+    let konst = |o: PyObject| Rc::new(Expr::Const(Rc::new(o)));
+    if version.at_least(3, 15) && (5..=11).contains(&arg) {
+        return Some(COMMON_CONST_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(arg)
+                .or_insert_with(|| match arg {
+                    5 => name("list"),
+                    6 => name("set"),
+                    7 => konst(PyObject::None),
+                    8 => konst(PyObject::Str(String::new())),
+                    9 => konst(PyObject::True),
+                    10 => konst(PyObject::False),
+                    11 => konst(PyObject::Int(-1)),
+                    _ => unreachable!(),
+                })
+                .clone()
+        }));
+    }
+    Some(match arg {
+        0 => name("AssertionError"),
+        1 => name("NotImplementedError"),
+        2 => name("tuple"),
+        3 => name("all"),
+        4 => name("any"),
+        5 if version.at_least(3, 15) => name("list"),
+        6 if version.at_least(3, 15) => name("set"),
+        7 if version.at_least(3, 15) => konst(PyObject::None),
+        8 if version.at_least(3, 15) => konst(PyObject::Str(String::new())),
+        9 if version.at_least(3, 15) => konst(PyObject::True),
+        10 if version.at_least(3, 15) => konst(PyObject::False),
+        11 if version.at_least(3, 15) => konst(PyObject::Int(-1)),
+        _ => return None,
+    })
+}
+
 // =====================  stack events, calls, functions, classes  =====================
 
 impl<'a> Ctx<'a> {
@@ -42939,7 +43015,52 @@ impl<'a> Ctx<'a> {
             .legacy_handler
             .as_ref()
             .map_or(false, |h| h.pop_seen);
-        if matches!(self.prev_op_at_exec, Some(Op::SWAP) | Some(Op::ROT_TWO))
+        // 3.15 returns out of a loop with `SWAP 3; POP_TOP; POP_TOP`
+        // (3.12-3.14: `SWAP 2; POP_TOP`); the second POP_TOP has a
+        // POP_TOP predecessor, so accept a short POP_TOP run whose
+        // start is a SWAP/ROT_TWO and whose end is a RETURN.
+        let cleanup_run_pop = self.version.at_least(3, 15)
+            && self.prev_op_at_exec == Some(Op::POP_TOP)
+            && self.idx_of.get(&self.cur_offset).map_or(false, |&pi| {
+                let mut b = pi;
+                let mut back = 0;
+                let mut saw_swap = false;
+                while b > 0 && back < 3 {
+                    b -= 1;
+                    back += 1;
+                    match self.instrs[b].op {
+                        Op::POP_TOP => continue,
+                        Op::SWAP | Op::ROT_TWO => {
+                            saw_swap = true;
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                if !saw_swap {
+                    return false;
+                }
+                let mut k = pi + 1;
+                let mut fwd = 0;
+                while let Some(nx) = self.instrs.get(k) {
+                    if matches!(nx.op, Op::RETURN_VALUE | Op::RETURN_CONST) {
+                        return true;
+                    }
+                    if fwd >= 4
+                        || !matches!(
+                            nx.op,
+                            Op::POP_TOP | Op::SWAP | Op::ROT_TWO | Op::NOP | Op::NOT_TAKEN
+                        )
+                    {
+                        return false;
+                    }
+                    k += 1;
+                    fwd += 1;
+                }
+                false
+            });
+        if (matches!(self.prev_op_at_exec, Some(Op::SWAP) | Some(Op::ROT_TWO))
+            || cleanup_run_pop)
             && (terminating_handler_cleanup
                 || (self.legacy_handler.is_none() && self.legacy_try.is_none()))
         {
@@ -49295,6 +49416,17 @@ fn refold_legacy_finally_return(stmts: &mut Vec<Stmt>) {
 }
 
 fn postprocess_body(mut body: Vec<Stmt>, code: &CodeObject, version: PythonVersion) -> Vec<Stmt> {
+    // PEP 649/749: 3.14+ compilers initialize a module-scope
+    // `__conditional_annotations__` set before the `from __future__`
+    // import. It is compiler infrastructure, not source: leaving it in
+    // pushes the future import off the top and the module no longer
+    // compiles. Strip it even when the `__annotate__` pseudo-def cannot
+    // be recovered (real-world 3.14/3.15 modules with lazy annotations).
+    body.retain(|s| {
+        !matches!(s, Stmt::Assign { targets, .. }
+            if targets.len() == 1
+                && matches!(&*targets[0], Expr::Name(n) if n == "__conditional_annotations__"))
+    });
     // 3.6+ evaluates module/class-body annotations into the scope's
     // `__annotations__` dict (`x: T = v` -> STORE x; T; LOAD
     // __annotations__; LOAD 'x'; STORE_SUBSCR). The walk renders these
@@ -51850,6 +51982,12 @@ fn genexpr_ternary_merge(
                 Op::LOAD_SMALL_INT => {
                     stack.push(Rc::new(Expr::Const(Rc::new(PyObject::Int(inst.arg as i32)))));
                 }
+                Op::LOAD_COMMON_CONSTANT => {
+                    match common_constant_expr(inst.arg, self.version) {
+                        Some(value) => stack.push(value),
+                        None => stack.push(Rc::new(Expr::Name("?".to_string()))),
+                    }
+                }
                 Op::LOAD_DEREF | Op::LOAD_CLOSURE | Op::LOAD_CLASSDEREF => {
                     let n = code
                         .deref_name(inst.arg as usize)
@@ -53175,13 +53313,22 @@ impl<'a> Ctx<'a> {
             }
         }
         let kind = kind?;
+        // 3.15 moves GET_ITER from before the prologue to between the
+        // accumulator BUILD and FOR_ITER:
+        //   LOAD xs; LOAD_FAST_AND_CLEAR x; SWAP 2; BUILD_LIST 0;
+        //   SWAP 2; GET_ITER; FOR_ITER
+        // The stack layout at FOR_ITER is unchanged, so recognizing this
+        // placement is enough (the append op arg shifts from 2 to 3).
+        let get_iter_between = self.instrs[j..i]
+            .iter()
+            .any(|x| matches!(x.op, Op::GET_ITER | Op::GET_AITER));
         if self.version.major == 2 {
             // py2: BUILD_x 0; <iter expr>; GET_ITER; FOR_ITER — verify a
             // GET_ITER sits between the build and the loop
-            let ok = self.instrs[j..i]
-                .iter()
-                .any(|x| matches!(x.op, Op::GET_ITER | Op::GET_AITER));
-            return if ok { Some(kind) } else { None };
+            return if get_iter_between { Some(kind) } else { None };
+        }
+        if get_iter_between && self.version.at_least(3, 15) {
+            return Some(kind);
         }
         // before the BUILD: LOAD_FAST_AND_CLEAR*/SWAP/... then GET_ITER
         let mut k = j;

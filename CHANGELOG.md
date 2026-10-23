@@ -1,10 +1,31 @@
 # Changelog
 
 All notable changes to pycdc-rs. The full verification baseline for every
-release: 520-module stdlib corpus (semantic 520/520) + behavior matrix +
-cargo tests, on 13 interpreters (2.6–3.14).
+release: 528-module stdlib corpus (semantic 528/528) + behavior matrix +
+cargo tests, on 14 interpreters (2.6–3.15).
 
 ## Unreleased
+
+### Python 3.15
+- `tools/gen_configs.py` now generates 3.15 from the live interpreter
+  (`NATIVE_VERSIONS`) instead of the stale xdis table. `dump_native.py`
+  reads 3.15's `frozendict` `_inline_cache_entries`, so the committed
+  `configs/opcodes/python_3_15.json` carries all 22 inline-cache counts
+  and the 6-entry `cmp_op`; the previous empty table mis-decoded every
+  cached instruction.
+- decompiler support for 3.15's changed encodings: inline comprehensions
+  (`GET_ITER` between the accumulator build and `FOR_ITER`, append arg 3),
+  the extended `LOAD_COMMON_CONSTANT` table (list/set/None/''/True/False/
+  -1), `IMPORT_NAME`'s name index at `arg >> 2`, `yield from` encoded as
+  `GET_ITER 3`, the loop-return cleanup `SWAP 3; POP_TOP; POP_TOP`, and the
+  `list`/`set` inline guards.
+- PEP 649/749: strip the compiler's module-scope
+  `__conditional_annotations__ = set()` prologue (3.14+) so
+  `from __future__ import ...` stays at the top of the file.
+- verification: behavior matrix 659/663 (all 2.6–3.14 pass; 3.15: 67/71),
+  stdlib corpus 528/528 semantic, real-world corpus 6411/6411. pandas and
+  scikit-learn compiled with 3.15: 2079/2091 recompile; the 12 remaining
+  shapes are documented in `docs/LIMITATIONS.md`.
 
 ### Community fixes (PRs #1–#26)
 - merged 26 targeted fixes from @EiNSTeiN- covering 3.11–3.14 bytecode

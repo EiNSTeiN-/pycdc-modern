@@ -27,7 +27,11 @@ XDIS_VERSIONS = [
     (3, 0), (3, 1), (3, 2), (3, 3), (3, 4), (3, 5), (3, 6), (3, 7),
     (3, 8), (3, 9), (3, 10), (3, 15),
 ]
-NATIVE_VERSIONS = ["3.11", "3.12", "3.13", "3.14"]
+NATIVE_VERSIONS = ["3.11", "3.12", "3.13", "3.14", "3.15"]
+
+# Adaptive-only opcodes never present in a .pyc, but matched by name in the
+# decompiler's ignore lists. 3.15 final's native opmap omits them.
+EXTRA_OP_NAMES = {"3.15": {"RESUME_CHECK": 200}}
 
 
 def sorted_list(v):
@@ -108,7 +112,10 @@ def gen_from_native(uv_versions):
             "implementation": "cpython",
             "have_argument": 90,
             "wordcode": True,
-            "opmap": {k: int(v) for k, v in raw["opmap"].items()},
+            "opmap": {
+                **{k: int(v) for k, v in raw["opmap"].items()},
+                **EXTRA_OP_NAMES.get("%d.%d" % vt, {}),
+            },
             "hasjrel": sorted_list(raw["hasjrel"]),
             "hasjabs": sorted_list(raw["hasjabs"]),
             "hasarg": sorted_list(raw["hasarg"]),
