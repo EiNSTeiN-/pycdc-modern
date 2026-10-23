@@ -29063,6 +29063,19 @@ return None;
                     }
                     st.push(st[st.len() - arg].clone());
                 }
+                Op::STORE_FAST => {
+                    // A walrus stores a COPY of the value still on top of the
+                    // expression stack. Standalone assignment is a statement.
+                    let value = st.pop()?;
+                    let surviving = st.last_mut()?;
+                    if !Rc::ptr_eq(surviving, &value) {
+                        return None;
+                    }
+                    *surviving = Rc::new(Expr::Named {
+                        target: self.name_expr(self.local_name(arg)),
+                        value,
+                    });
+                }
                 Op::SWAP => {
                     if arg == 0 || arg > st.len() {
                         return None;
