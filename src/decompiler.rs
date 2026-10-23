@@ -52151,15 +52151,17 @@ fn genexpr_ternary_merge(
                 }
                 Op::CALL_FUNCTION_EX => {
                     // `f(*t)` / `f(*a, **k)` element: [callable(+marker),
-                    // args-iterable, (kwargs dict when arg&1)]
+                    // args-iterable, kwargs dict (or NULL in 3.14 when absent)].
+                    // Before 3.14 the kwargs slot exists only when arg&1 is set.
                     let underflow = || Rc::new(Expr::Name("?".to_string()));
-                    let star_kw = if inst.arg & 1 != 0 {
-                        stack.pop()
+                    let star_kw = if self.version.at_least(3, 14) || inst.arg & 1 != 0 {
+                        stack.pop().filter(|value| !is_null_marker(value))
                     } else {
                         None
                     };
                     let star = stack.pop().unwrap_or_else(underflow);
-                    let func = if self.version.at_least(3, 14) {
+                    // Since 3.13 the NULL marker follows the callable.
+                    let func = if self.version.at_least(3, 13) {
                         if matches!(stack.last(), Some(m) if is_null_marker(m)) {
                             stack.pop();
                         }

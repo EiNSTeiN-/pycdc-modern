@@ -153,6 +153,13 @@ inner `BUILD_MAP 0` accumulator lands on the walker's stack, `SWAP` is
 not modeled, and the following `FOR_ITER` treats it as a second `for`
 clause (`... for c, v in {}`), so the output does not parse.
 
+Simple expanded calls in a Python 3.13 or 3.14 generator, such as
+`(factory(*row) for row in rows)` and `(factory(**dict(row)) for row in rows)`,
+now respect `CALL_FUNCTION_EX`'s callable/NULL order introduced in 3.13. In
+3.14 they also consume its unconditional keyword slot and treat a NULL marker
+as absent keyword arguments. The nested-comprehension stack issues below
+remain.
+
 A frame-stack prototype (one frame per comprehension level, `SWAP`
 modeled, the accumulator placeholder replaced by Rc identity when a level
 ends, `pending_or_filter` flushed per level) was implemented **twice** and
