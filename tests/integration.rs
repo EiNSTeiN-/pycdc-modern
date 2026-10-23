@@ -107,6 +107,26 @@ fn py310_basics() {
 }
 
 #[test]
+fn assignment_identity() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("assignment_identity.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "def separate(read):\n    left, right = read(), read()\n    return left, right",
+                "def shared(read):\n    left = right = read()\n    return left, right",
+                "def separate_none():\n    left, right = None, None\n    return left, right",
+                "def shared_none():\n    right = left = None\n    return left, right",
+            ],
+            &fixture,
+        );
+        assert_eq!(src.matches("read()").count(), 3, "{fixture}:\n{src}");
+    }
+}
+
+#[test]
 fn py311_comprehensions() {
     let (src, clean) = decompile_fixture("comprehensions.3.11.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
@@ -152,10 +172,58 @@ fn py312_hello() {
 }
 
 #[test]
+fn assignment_chains() {
+    // 3.13 introduces fused stores; older fixtures check COPY-only chains.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("assignment_chains.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        for (name, names) in [
+            ("three", &['a', 'b', 'c'][..]),
+            ("four", &['a', 'b', 'c', 'd'][..]),
+            ("five", &['a', 'b', 'c', 'd', 'e'][..]),
+            ("six", &['a', 'b', 'c', 'd', 'e', 'f'][..]),
+        ] {
+            let names: Vec<String> = names.iter().map(char::to_string).collect();
+            let targets = names.join(" = ");
+            let values = names.join(", ");
+            assert_contains(
+                &src,
+                &[
+                    &format!("def {name}(read):\n    {targets} = read()\n    return {values}"),
+                    &format!("def {name}_none():\n    {targets} = None\n    return {values}"),
+                ],
+                &fixture,
+            );
+        }
+        assert_eq!(src.matches("read()").count(), 4, "{fixture}:\n{src}");
+    }
+}
+
+#[test]
 fn py313_hello() {
     let (src, clean) = decompile_fixture("hello.3.13.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
     assert_contains(&src, &["class Greeter:", "while a < n:", "a, b = b, a + b"], "py3.13 hello");
+}
+
+#[test]
+fn generator_expanded_calls() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("generator_expanded_calls.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "def positional(rows, factory):\n    return tuple((factory(*row) for row in rows))",
+                "def keywords(rows, factory):\n    return tuple((factory(*(), **{**dict(row)}) for row in rows))",
+                "def both(rows, factory):\n    return tuple((factory(*row[0], **{**row[1]}) for row in rows))",
+            ],
+            &fixture,
+        );
+        assert_eq!(src.matches("factory(").count(), 3, "{fixture}:\n{src}");
+    }
 }
 
 #[test]
@@ -168,4 +236,592 @@ fn py314_hello() {
         &["class Greeter:", "for i in range(times):", "while a < n:"],
         "py3.14 hello",
     );
+}
+
+#[test]
+fn sequential_generator_handlers_keep_the_shared_mainline() {
+    // CALL_INTRINSIC_1 3 starts in 3.12; 3.11 has no frame-wide handler.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(
+            &format!("sequential_generator_handlers.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        let body = "    try:\n        yield work('first')\n    except ValueError:\n        yield 2\n    yield 3\n    try:\n        yield work('last')\n    except KeyError:\n        yield 5\n    yield 6";
+        for definition in ["def synchronous(work):", "async def asynchronous(work):"] {
+            let expected = format!("{definition}\n{body}");
+            assert_contains(&src, &[&expected], version);
+        }
+        assert!(!src.contains("else:"), "Python {version}: spurious handler else:\n{src}");
+    }
+}
+
+#[test]
+fn empty_defaults_keep_the_comprehension_level() {
+    // PEP 709 inlining starts in 3.12; retain the 3.11 compatibility case.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("comprehension_default_arguments.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for (name, expression) in [
+            ("list_default", "[field for row in rows for field in row.get('values', [])]"),
+            ("set_default", "{field for row in rows for field in row.get('values', {})}"),
+            ("dict_default", "{field: len(field) for row in rows for field in row.get('values', {})}"),
+            ("nested_list", "[[field for field in row.get('values', [])] for row in rows]"),
+            ("nested_set", "[{field for field in row.get('values', {})} for row in rows]"),
+            ("nested_dict", "[{field: len(field) for field in row.get('values', {})} for row in rows]"),
+            ("subscript", "[field for row in rows for field in row['values']]"),
+            ("no_default", "[field for row in rows for field in row.get('values')]"),
+            ("tuple_default", "[field for row in rows for field in row.get('values', ())]"),
+        ] {
+            let expected = format!(
+                "def {name}(rows):\n    row = 'saved-row'\n    field = 'saved-field'\n    result = {expression}\n    return result, row, field");
+            assert_contains(&src, &[&expected], version);
+        }
+    }
+}
+
+#[test]
+fn unpacked_targets_keep_iterator_cleanup_and_saved_locals() {
+    // PEP 709 inlining starts in 3.12; retain the 3.11 compatibility case.
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("unpacked_comprehension_cleanup.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for (name, expression) in [
+            ("unpack4", "[a + b + c + d for rows in groups for a, b, c, d in rows]"),
+            ("unpack_list", "[(a, c) for a, b in groups for c, d in b]"),
+            ("unpack_set", "{(a, c) for a, b in groups for c, d in b}"),
+            ("unpack_dict", "{a: c for a, b in groups for c, d in b}"),
+            ("unpack6", "[(a, c, e) for a, b in groups for c, d in b for e, f in d]"),
+            ("simple", "[(a, c) for a in groups for c in a]"),
+            ("mixed", "[(a, c) for key, a in groups for c in a]"),
+            ("mixed_inner", "[(a, c) for a in groups for key, c in a]"),
+        ] {
+            let expected = format!(
+                "def {name}(groups):\n    a, b, c, d, e, f = 10, 20, 30, 40, 50, 60\n    result = {expression}\n    after = 0\n    for number in (1, 2, 3):\n        after += number\n    return result, (a, b, c, d, e, f), after");
+            assert_contains(&src, &[&expected], version);
+        }
+    }
+}
+
+#[test]
+fn padded_handler_returns_keep_false_before_the_success_tail() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        for padding in [1, 3, 9] {
+            let (src, clean) = decompile_fixture(
+                &format!("handler_return_padding_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, {padding} NOPs: incomplete:\n{src}");
+            assert_contains(&src, &[
+                "async def handled(read, log):\n    try:\n        await read()\n        log('saved')\n    except ValueError:\n        log('locked')\n        return False\n    except Exception as error:\n        log('failed', error)\n        return False\n    return True",
+            ], version);
+        }
+    }
+}
+
+#[test]
+fn large_dictionary_displays_remain_comprehension_elements() {
+    // CPython 3.10 starts using MAP_ADD 1 for large displays. Before 3.12,
+    // list comprehensions also use the separate code-object walker.
+    for version in ["3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(
+            &format!("comprehension_dictionary_displays.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for size in [17, 20] {
+            let fields = (0..size).map(|index| format!("'k{index}': row + {index}"))
+                .collect::<Vec<_>>().join(", ");
+            for (name, open, close) in [("list", "[", "]"), ("generator", "(", ")")] {
+                let expected = format!(
+                    "def {name}{size}(rows):\n    return {open}{{{fields}}} for row in rows{close}");
+                assert_contains(&src, &[&expected], version);
+            }
+        }
+        assert_contains(&src, &[
+            "def dictionary_comprehension(rows):\n    return {row: row + 1 for row in rows}",
+            "def small_display(rows):\n    return [{'value': row} for row in rows]",
+        ], version);
+    }
+}
+
+#[test]
+fn extended_loop_prefix_preserves_handler_continue() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("extended_loop_prefix.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        for count in [1, 30, 60] {
+            let body = "            work(row)\n".repeat(count);
+            let expected = format!(
+                "def size_{count}(rows, work):\n    result = []\n    for row in rows:\n        try:\n{body}        except ValueError:\n            continue\n        result.append(row)");
+            assert_contains(&src, &[&expected], version);
+        }
+    }
+}
+
+#[test]
+fn conditional_loop_prefix_keeps_both_arms_inside_loop() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("conditional_loop_prefix.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        let args = "row.ok, row.a, row.b, row.c, row.d, row.e, row.f, row.g, row.h, row.i, row.j, row.k, row.l";
+        let file_condition = if version == "3.12" { "" } else { "not " };
+        let directory_condition = if version == "3.11" { "elif not" } else { "if" };
+        assert_contains(
+            &src,
+            &[
+                &format!("    for row in rows:\n        if row.is_file:\n            if {file_condition}work('file', {args}):"),
+                &format!("        {directory_condition} work('directory', {args}):"),
+                "    return success",
+            ],
+            version,
+        );
+        assert!(!src.contains("\n    success = False"), "Python {version}: failure assignment escaped the loop:\n{src}");
+        if version == "3.13" || version == "3.14" {
+            assert_contains(
+                &src,
+                &["                success = False\n                continue\n            continue"],
+                version,
+            );
+        }
+    }
+}
+
+#[test]
+fn awaited_collections_use_synchronous_iteration() {
+    for version in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("awaited_synchronous_iteration.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"async def awaited(read):
+    result = []
+    for item in await read():
+        result.append(item)
+    return result"#,
+            r#"async def asynchronous(read):
+    result = []
+    async for item in read():
+        result.append(item)
+    return result"#,
+            r#"async def sync(read):
+    result = []
+    for item in read():
+        result.append(item)
+    return result"#,
+        ], version);
+    }
+}
+
+#[test]
+fn real_value_build_still_matches_the_sunk_tail() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("sunk_value_return_control.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def select(value):
+    try:
+        entry = value.entry
+    except AttributeError:
+        kind = 'missing'
+    else:
+        kind = 'present'
+    return kind, value"#,
+        ], version);
+    }
+}
+
+#[test]
+fn padding_does_not_match_a_mainline_value_build() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        for padding in [1, 3, 9] {
+            let (src, clean) = decompile_fixture(
+                &format!("padded_value_returns_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, {padding} NOPs: incomplete:\n{src}");
+            assert_contains(&src, &[
+                r#"def synchronous(read, build):
+    try:
+        item = read()
+    except ValueError:
+        return build('missing')
+    return build(item)"#,
+                r#"async def asynchronous(read, build):
+    try:
+        item = await read()
+    except ValueError:
+        return build('missing')
+    return build(item)"#,
+            ], version);
+        }
+    }
+}
+
+#[test]
+fn finite_else_span_keeps_its_inner_guard() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("guarded_else_merge.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"async def awaited(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = 1
+    else:
+        row = await owner.fetch()
+        if row and row[0] is not None:
+            value = float(row[0])
+    owner.record(value)
+    return value"#,
+            r#"async def synchronous(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = float(1)
+    else:
+        row = owner.fetch()
+        if row and row[0] is not None:
+            value = 2
+    owner.record(value)
+    return value"#,
+            r#"async def attribute(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = float(active['total'])
+    else:
+        row = owner.row
+        if row and row[0] is not None:
+            value = float(row[0])
+    owner.record(value)
+    return value"#,
+            r#"async def following_else_work(owner):
+    value = None
+    active = owner.active
+    if active:
+        value = 1
+    else:
+        row = await owner.fetch()
+        if row and row[0] is not None:
+            value = 2
+        owner.record('queried')
+    owner.record(value)
+    return value"#,
+            r#"async def independent(owner):
+    value = None
+    row = None
+    if owner.active:
+        value = 1
+    else:
+        row = await owner.fetch()
+    if row and row[0] is not None:
+        value = 2
+    return value"#,
+        ], version);
+    }
+}
+
+#[test]
+fn split_exception_suites_generate_one_complete_try_statement() {
+    use pycdc::ast::{ExceptHandler, Expr, Stmt};
+    use pycdc::version::PythonVersion;
+    use std::rc::Rc;
+    let name = |value: &str| Rc::new(Expr::Name(value.into()));
+    let inner = Stmt::Try {
+        body: vec![Stmt::Expr(name("work")), Stmt::Expr(name("more_work"))],
+        handlers: vec![ExceptHandler {
+            type_: Some(name("ValueError")), name: Some(name("error")),
+            body: vec![Stmt::Expr(name("handled"))], is_star: false,
+        }],
+        orelse: vec![], finalbody: vec![],
+    };
+    let outer = Stmt::Try {
+        body: vec![inner.clone()], handlers: vec![],
+        orelse: vec![Stmt::Expr(name("success"))],
+        finalbody: vec![Stmt::Expr(name("cleanup")), Stmt::Expr(name("more_cleanup"))],
+    };
+    let module = PycModule::from_bytes(include_bytes!("pyc/hello.3.14.pyc")).unwrap();
+    // Unified try/except/finally syntax starts in Python 2.5. The repair
+    // concerns the recovered AST shape, rather than one opcode version.
+    for (major, minor) in [(2, 5), (2, 7), (3, 8), (3, 11), (3, 12), (3, 13), (3, 14)] {
+        let version = PythonVersion { major, minor, ..module.version() };
+        let binding = if major == 2 { ", error" } else { " as error" };
+        let expected = format!("try:\n    work\n    more_work\nexcept ValueError{binding}:\n    handled\nelse:\n    success\nfinally:\n    cleanup\n    more_cleanup\n");
+        assert_eq!(generate(&[outer.clone()], version, true), expected);
+
+        // A legitimate outer try/finally has no success suite to reunite.
+        let nested = Stmt::Try {
+            body: vec![inner.clone()], handlers: vec![], orelse: vec![],
+            finalbody: vec![Stmt::Expr(name("cleanup"))],
+        };
+        let expected = format!("try:\n    try:\n        work\n        more_work\n    except ValueError{binding}:\n        handled\nfinally:\n    cleanup\n");
+        assert_eq!(generate(&[nested], version, true), expected);
+    }
+}
+
+#[test]
+fn keyword_calls_survive_conditional_value_reconstruction() {
+    for version in ["3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("keyword_conditional_calls.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def case_0(value, build, other):
+    return build('reject' if value else 'accept', amount=0)"#,
+            r#"def case_1(value, build, other):
+    return build('prefix', amount=0 if value else 1)"#,
+            r#"def case_2(value, build, other):
+    return build(0 if value else 1, amount=value)"#,
+            r#"def case_9(value, build, other):
+    return build('prefix', amount=1 if value else 2, last=other(value))"#,
+            r#"def case_11(value, build, other):
+    return other(build(amount=1) if value else build(amount=2, other=3))"#,
+        ], version);
+    }
+}
+
+#[test]
+fn keyword_call_merge_does_not_hoist_an_arm_local_callable() {
+    for version in ["3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("keyword_call_arm_boundary.{version}.pyc"));
+        assert!(!clean, "Python {version}: an unproved call merge must remain incomplete:\n{src}");
+        assert!(!src.contains("owner.build(amount=1 if value else 2)"),
+            "Python {version}: callable resolution moved before the condition:\n{src}");
+    }
+}
+
+#[test]
+fn overwritten_unpack_slots_reuse_the_surviving_binding() {
+    for version in ["3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("repeated_unpack_bindings.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def repeated_loop(values):
+    result = []
+    for value, discarded, discarded, discarded in values:
+        result.append(value is not None)
+    return result"#,
+            r#"def repeated_list(values):
+    return [value is not None for value, discarded, discarded, discarded in values]"#,
+            r#"def underscore_loop(values):
+    result = []
+    for value, _, discarded, discarded in values:
+        result.append((value, discarded, _))
+    return result"#,
+            r#"def underscore_list(values):
+    return [(value, discarded, _) for value, _, discarded, discarded in values]"#,
+            r#"def nested_loop(values):
+    result = []
+    for value, (discarded, discarded) in values:
+        result.append((value, discarded))
+    return result"#,
+            r#"def nested_list(values):
+    return [(value, discarded) for value, (discarded, discarded) in values]"#,
+        ], version);
+    }
+}
+
+#[test]
+fn slice_constants_preserve_axes_and_runtime_calls() {
+    for version in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let (src, clean) = decompile_fixture(&format!("slice_constants_and_calls.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(&src, &[
+            r#"def dynamic_axes(data, stop):
+    return data[:stop, :]"#,
+            r#"def constant_axes(data, stop):
+    return data[:, :]"#,
+            r#"def mixed_axes(data, stop):
+    return data[1:stop:2, :, 7]"#,
+            r#"def call(data, stop):
+    return data[slice(None, stop, None)]"#,
+            r#"def call_axes(data, stop):
+    return data[slice(None, stop, None), :]"#,
+        ], version);
+    }
+}
+
+#[test]
+fn nested_conditional_comprehension_arms_keep_their_values() {
+    for version in ["3.12", "3.13", "3.14"] {
+        let fixture = format!("nested_conditional_elements.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return [{'excluded': {'count': row['count'], 'reasons': loads(row['reasons']) if row['reasons'] else {}} if row['count'] is not None else {}, 'archived': str(row['archived']) if row['archived'] else None} for row in rows]",
+                "return [build(1 if row.inner else 2) if row.outer else 3 for row in rows]",
+                "return [1 if row.outer else build(2 if row.inner else 3) for row in rows]",
+                "return [build(1 if row.inner is None else 2) if row.outer else build(3 if row.inner is not None else 4) for row in rows]",
+            ],
+            &fixture,
+        );
+    }
+}
+
+#[test]
+fn chained_comprehension_filters_keep_each_polarity() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("chained_comprehension_filters.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        for (kind, open, close, element) in [
+            ("list", "[", "]", "value"),
+            ("set", "{", "}", "value"),
+            ("dict", "{", "}", "value: value"),
+        ] {
+            for (polarity, negation) in [("positive", ""), ("negative", "not ")] {
+                for join in ["separate", "joined"] {
+                    let expected = format!(
+                        "def {kind}_{polarity}_{join}(values):\n    return {open}{element} for value in values if {negation}isinstance(value, str) if value{close}"
+                    );
+                    assert_contains(&src, &[&expected], &fixture);
+                }
+            }
+        }
+        assert_contains(
+            &src,
+            &[
+                "return [row.tag for row in rows if row.value == wanted if row.ready() if row.final()]",
+                "return [row.tag for row in rows if row.value != wanted if not row.ready() if row.final()]",
+            ],
+            &fixture,
+        );
+        let normalized = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_contains(
+            &normalized,
+            &["def broken_lines(values): return [value for value in values if isinstance(value, str) if value]"],
+            &fixture,
+        );
+    }
+}
+
+#[test]
+fn comprehension_boolean_values_remain_elements_not_filters() {
+    for version in ["3.12", "3.13", "3.14"] {
+        let fixture = format!("comprehension_boolean_values.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return [max(0.0, float(row.get('x') or 0.0)) for row in rows]",
+                "return [row[1] or 0 for row in rows]",
+                "return [row[1] and 7 for row in rows]",
+                "return {row[1] or 0 for row in rows}",
+                "return {row[0]: row[1] and 7 for row in rows}",
+                "return [row.first() or row.second() for row in rows]",
+                "return [row.first() and row.second() for row in rows]",
+                "return [row[1] for row in rows if row[0]]",
+                "return [row[1] or 0 for row in rows if row[0]]",
+                "return [row[1] if row[0] else 0 for row in rows]",
+            ],
+            &fixture,
+        );
+    }
+}
+
+#[test]
+fn keyword_expansions_keep_merge_checks_and_dictionary_boundaries() {
+    for version in ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("ordered_keyword_expansions.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return fn(1, fixed=2, **first, **second)",
+                "return fn(1, **first, **{'fixed': 2}, **second)",
+                "return fn(1, **first, **second)",
+                "return fn(1, **{'fixed': 2, **first, **second})",
+                "return fn(1, **{'my col': 2, **first, **second})",
+                "return fn(1, **{'class': 2, **first, **second})",
+                "return fn(1, **{'fixed': 2, 'fixed': 3, **first, **second})",
+                "return fn(1, fixed=2, **get_first(), **get_second())",
+            ],
+            &fixture,
+        );
+    }
+}
+
+#[test]
+fn deferred_class_annotations_keep_registration_gates() {
+    let fixture = "class_annotation_registration.3.14.pyc";
+    let (src, clean) = decompile_fixture(fixture);
+    assert!(clean, "output marked incomplete:\n{src}");
+    assert!(src.starts_with("module_count: int = 5\n"), "{src}");
+    assert_contains(
+        &src,
+        &[
+            "class Always:",
+            "'''Documented class.'''",
+            "    if True:\n        amount: int = 3\n        label: str = 'ready'",
+            "        if enabled:\n            if True:\n                label: str = 'ready'",
+            "        for value in values:\n            if True:\n                limit: int = default(value)",
+            "        for value in values:\n            if True:\n                amount: int = default(value)",
+            "def read(self) -> int:",
+        ],
+        fixture,
+    );
+    assert!(!src.contains("__conditional_annotations__"), "{src}");
+}
+
+#[test]
+fn nested_comprehensions_remain_generator_elements() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("nested_generator_comprehensions.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return tuple(({key: row[key] for key in row} for row in rows))",
+                "return tuple(([value * 2 for value in row] for row in rows))",
+                "return tuple(({value * 2 for value in row} for row in rows))",
+                "return tuple((collect([value * 2 for value in row]) for row in rows))",
+                "return tuple(({key: row[key] for key in row if key} for row in rows if row))",
+                "return tuple(({key: value for key, value in zip(columns, row) if key} for row in rows))",
+            ],
+            &fixture,
+        );
+    }
+}
+
+#[test]
+fn boolean_value_chains_preserve_call_arguments_and_prefixes() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("boolean_call_arguments.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "return call(before(), first() and second() or last(), after())",
+                "return call(value, value and second() or last(), after())",
+                "return bool(a and b or c or d or e)",
+                "return bool(c or d or a and b or e)",
+                "return bool(a and a.get('available') or b or c or d or e)",
+                "value = a and a.get('available') or b or c or d or e\n    return bool(value)",
+                "return bool(a or b or c or d or e)",
+                "return bool(a and b and c and d and e)",
+                "return call(a and b or c, d if e else 0)",
+            ],
+            &fixture,
+        );
+    }
+}
+
+#[test]
+fn independent_lookup_guards_keep_assignment_and_return_inside_the_loop() {
+    for version in ["3.11", "3.12", "3.13", "3.14"] {
+        let fixture = format!("loop_lookup_guards.{version}.pyc");
+        let (src, clean) = decompile_fixture(&fixture);
+        assert!(clean, "{fixture}: output marked incomplete:\n{src}");
+        // The existing None-jump printer uses either equivalent spelling.
+        let src = src.replace("not coordinator is not None", "coordinator is None");
+        assert_contains(
+            &src,
+            &[
+                "def rating_lookup(values):\n    for value in values:\n        if not value.rating < 10:\n            continue\n        coordinator = value.coordinator\n        if coordinator is None:\n            continue\n        return coordinator",
+                "def dictionary_lookup(rows):\n    for row in rows:\n        if not isinstance(row, dict):\n            continue\n        coordinator = row.get('coordinator')\n        if coordinator is None:\n            continue\n        return coordinator",
+                "def none_lookup(rows):\n    for row in rows:\n        if row is None:\n            continue\n        coordinator = row.coordinator\n        if coordinator is None:\n            continue\n        return coordinator",
+                "return [row.get('coordinator') for row in rows if isinstance(row, dict)]",
+            ],
+            &fixture,
+        );
+        assert!(!src.contains("value.rating >="), "{fixture}: comparison inverted");
+    }
 }

@@ -1,0 +1,17 @@
+{
+ "version": "3.11.14",
+ "interp": "~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11",
+ "counts": {
+  "PASS": 2
+ },
+ "results": [
+  {
+   "module": "handler_return_padding_3",
+   "verdict": "PASS"
+  },
+  {
+   "module": "padded_value_returns_3",
+   "verdict": "PASS"
+  }
+ ]
+}

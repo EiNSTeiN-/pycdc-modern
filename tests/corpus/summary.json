@@ -20,6 +20,12 @@
    "AST-PASS": 8
   }
  },
+ "3.11.14": {
+  "interp": "~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11",
+  "counts": {
+   "PASS": 2
+  }
+ },
  "3.11.16": {
   "interp": "~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11",
   "counts": {
@@ -34,11 +40,29 @@
    "AST-PASS": 10
   }
  },
+ "3.12.3": {
+  "interp": "~/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12",
+  "counts": {
+   "PASS": 2
+  }
+ },
  "3.13.15": {
   "interp": "/opt/homebrew/bin/python3.13",
   "counts": {
    "PASS": 33,
    "AST-PASS": 7
+  }
+ },
+ "3.13.7": {
+  "interp": "/opt/homebrew/bin/python3.13",
+  "counts": {
+   "PASS": 2
+  }
+ },
+ "3.14.2": {
+  "interp": "/opt/homebrew/bin/python3.14",
+  "counts": {
+   "PASS": 2
   }
  },
  "3.14.7": {
