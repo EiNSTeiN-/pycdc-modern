@@ -259,14 +259,16 @@ struct InlineComp {
     key: Option<ExprRef>,
     cleared_vars: Vec<String>,
     target_seen: bool,
-    /// pending element-ternary folds: (merge offset, condition). The
+    /// Pending value folds: (merge offset, left/condition, optional bool op).
+    /// An and/or fold combines its saved left with the right value; a ternary
+    /// combines its condition with both arm values. The
     /// linear comp walk evaluates BOTH arms of an element ternary onto
     /// the value stack (then under else); when the walk reaches the
     /// ternary's merge offset the pair is folded into a Ternary. This
     /// works for nested ternaries (inner merge folds first) and for
     /// dict-comp key AND value positions alike (folding at the append
     /// op cannot tell which slot a pending cond belongs to).
-    pending_merges: Vec<(usize, ExprRef)>,
+    pending_merges: Vec<(usize, ExprRef, Option<BoolOpKind>)>,
     /// else-arm target shared by the current and-chain's ternary links
     tern_chain_t: Option<usize>,
 }
@@ -7540,6 +7542,12 @@ impl<'a> Ctx<'a> {
         while k2 < self.instrs.len() {
             let c = &self.instrs[k2];
             match c.op {
+                Op::NOP | Op::NOT_TAKEN | Op::CACHE => {
+                    // Padding does not end the post-POP_EXCEPT return
+                    // trailer. Keep scanning through it so an unnamed
+                    // handler retains its already loaded return value.
+                    k2 += 1;
+                }
                 Op::LOAD_CONST | Op::STORE_FAST | Op::STORE_NAME
                 | Op::DELETE_FAST | Op::DELETE_NAME | Op::STORE_DEREF
                 | Op::DELETE_DEREF => {
@@ -14808,6 +14816,7 @@ impl<'a> Ctx<'a> {
             | Op::COPY_DICT_WITHOUT_KEYS => {
                 if self.inline_comp.is_some()
                     && matches!(inst.op, Op::LIST_APPEND | Op::SET_ADD | Op::MAP_ADD)
+                    && (!self.version.at_least(3, 10) || arg >= 2)
                 {
                     self.comp_add_element(inst);
                 } else {
@@ -15291,8 +15300,8 @@ impl<'a> Ctx<'a> {
                 let (ex_kws, star_kw) = if let Some(kw) = kwargs_opt {
                     let (k, s) = flatten_ex_kwargs(kw.clone());
                     // a DICT_MERGE-built kwargs dict with const keys
-                    // plus ONE trailing star is the compiler's own
-                    // layout for `f(kw=..., **x)` — decompose it back
+                    // plus expansion entries is the compiler's own
+                    // layout for `f(kw=..., **x, **y)` — decompose it back
                     // (the whole-dict rendering recompiles to
                     // BUILD_MAP + DICT_UPDATE and breaks sig-exactness;
                     // configparser 3.12 _get_conv). A DICT_UPDATE-built
@@ -15306,34 +15315,24 @@ impl<'a> Ctx<'a> {
                             break 'dc None;
                         }
                         if let Expr::Dict(entries) = &*kw {
-                            if entries.len() >= 2
-                                && matches!(
-                                    &*entries[entries.len() - 1].0,
-                                    Expr::Starred(_)
-                                )
-                                && entries[..entries.len() - 1].iter().all(
-                                    |(kk, _)| {
-                                        matches!(&**kk, Expr::Const(o)
-                                            if matches!(&**o, PyObject::Str(_)))
-                                    },
-                                )
-                            {
+                            if entries.iter().any(|(key, _)| matches!(&**key, Expr::Starred(_))) {
                                 let mut kws = Vec::new();
-                                for (kk, v) in &entries[..entries.len() - 1] {
-                                    if let Expr::Const(o) = &**kk {
-                                        if let PyObject::Str(name) = &**o {
-                                            kws.push((
-                                                Some(name.clone()),
-                                                v.clone(),
-                                            ));
+                                let mut named = Vec::new();
+                                for (key, value) in entries {
+                                    match &**key {
+                                        Expr::Starred(inner) => kws.push((None, inner.clone())),
+                                        Expr::Const(object) => {
+                                            let PyObject::Str(name) = &**object else { break 'dc None; };
+                                            if !is_kw_name_ok(name) || named.contains(name) {
+                                                break 'dc None;
+                                            }
+                                            named.push(name.clone());
+                                            kws.push((Some(name.clone()), value.clone()));
                                         }
+                                        _ => break 'dc None,
                                     }
                                 }
-                                if let Expr::Starred(inner) =
-                                    &*entries[entries.len() - 1].0
-                                {
-                                    break 'dc Some((kws, Some(inner.clone())));
-                                }
+                                break 'dc Some((kws, None));
                             }
                         }
                         None
@@ -19325,20 +19324,10 @@ let reopen = self
                     return true;
                 }
                 let target = inst.target.unwrap_or(inst.end());
-                // async for: the iterable expression is an Await, or we are
-                // inside an async def using GET_AITER
-                let is_async = matches!(
-                    self.stack.last(),
-                    Some(Sv::E(e)) if matches!(&**e, Expr::Await(_))
-                );
-                if is_async {
-                    if let Some(Sv::E(e)) = self.stack.last_mut() {
-                        if let Expr::Await(inner) = &**e {
-                            *e = inner.clone();
-                        }
-                    }
-                }
-                self.handle_for_iter(target, is_async);
+                // FOR_ITER iterates synchronously, even when the collection
+                // was produced by `await fetch()`. Genuine async iteration
+                // uses GET_AITER/GET_ANEXT and its separate decoder path.
+                self.handle_for_iter(target, false);
                 true
             }
             Op::FOR_LOOP => {
@@ -23206,15 +23195,20 @@ impl<'a> Ctx<'a> {
     fn is_loop_top_prefix(&self, t: usize, start: usize) -> bool {
         // 3.11+ folds inline CACHE entries into each instruction's size,
         // so offsets inside a cached instruction have no idx_of entry
-        // either - a back edge landing <=8 bytes before the loop top
-        // would falsely match a CACHE tail (compileall 3.13 main tore
-        // into an INCOMPLETE stub). The EXTENDED_ARG-prefix shape this
-        // recognizes is pre-3.11 wordcode only (no CACHE gaps).
-        if self.version.at_least(3, 11) {
-            return false;
-        }
+        // either. Absence from the instruction map cannot distinguish
+        // a CACHE tail from an EXTENDED_ARG prefix: modern offsets need
+        // proof from the original bytes.
         if t >= start || start - t > 8 {
             return false;
+        }
+        if self.version.at_least(3, 11) {
+            if t % 2 != 0 || start % 2 != 0 {
+                return false;
+            }
+            if !(t..start).step_by(2).all(|offset| self.code.code.get(offset)
+                .map_or(false, |byte| self.table.op(*byte) == Op::EXTENDED_ARG)) {
+                return false;
+            }
         }
         // no instruction STARTS at t (idx_of also maps END offsets: the
         // preceding instruction's end lands on t and must not count as
@@ -28805,6 +28799,15 @@ return None;
         if st_t.len() != st_e.len() || st_t.is_empty() {
             return None;
         }
+        // CALL_KW support must not make an arm-local callable/argument
+        // prefix look like a preload from before the condition. Merging
+        // only its final slot would hoist that prefix across the truth
+        // test. Decline this shape until the whole arm can be preserved.
+        if st_t.len() != base.len() + 1
+            && self.instrs[tstart..=re].iter().any(|ins| ins.op == Op::CALL_KW)
+        {
+            return None;
+        }
         let slot_t = st_t.last()?.clone();
         let slot_e = st_e.last()?.clone();
         // compare the UNDER-stack only — the tops are the slot values
@@ -28931,9 +28934,17 @@ return None;
             (
                 Expr::Call { func: fa, args: aa, keywords: ka, star_args: sa, star_kwargs: ska },
                 Expr::Call { func: fb, args: ab, keywords: kb, star_args: sb, star_kwargs: skb },
-            ) if ka.is_empty() && kb.is_empty() && sa.is_none() && sb.is_none() && ska.is_none() && skb.is_none() && aa.len() == ab.len() => {
+            ) if sa.is_none() && sb.is_none() && ska.is_none() && skb.is_none()
+                && aa.len() == ab.len() && ka.len() == kb.len()
+                && ka.iter().zip(kb).all(|((a, _), (b, _))| a == b) => {
                 let mut slots: Vec<(&ExprRef, &ExprRef)> = vec![(fa, fb)];
                 for (x, y) in aa.iter().zip(ab.iter()) {
+                    slots.push((x, y));
+                }
+                // CALL_KW can now reach this merge through the bounded
+                // walker. Keep keyword values in the same ordered slot
+                // model as positional values, preserving the call itself.
+                for ((_, x), (_, y)) in ka.iter().zip(kb) {
                     slots.push((x, y));
                 }
                 let mut merged_idx: Option<usize> = None;
@@ -28954,8 +28965,9 @@ return None;
                 reps[idx] = val;
                 Some(Rc::new(Expr::Call {
                     func: reps[0].clone(),
-                    args: reps[1..].to_vec(),
-                    keywords: Vec::new(),
+                    args: reps[1..1 + aa.len()].to_vec(),
+                    keywords: ka.iter().zip(&reps[1 + aa.len()..])
+                        .map(|((name, _), value)| (name.clone(), value.clone())).collect(),
                     star_args: None,
                     star_kwargs: None,
                 }))
@@ -29150,6 +29162,28 @@ return None;
                         keywords: Vec::new(),
                         star_args: None,
                         star_kwargs: None,
+                    }));
+                }
+                Op::CALL_KW => {
+                    let names = st.pop()?;
+                    let Expr::Const(names) = &*names else { return None; };
+                    let PyObject::Tuple(names) = &**names else { return None; };
+                    let names: Option<Vec<String>> = names.iter().map(|value| match &**value {
+                        PyObject::Str(name) => Some(name.clone()), _ => None,
+                    }).collect();
+                    let names = names?;
+                    if names.len() > arg || st.len() < arg + 1 { return None; }
+                    let all = st.split_off(st.len() - arg);
+                    let positional = arg - names.len();
+                    let args = all[..positional].to_vec();
+                    let keywords = names.into_iter().zip(all[positional..].iter().cloned())
+                        .map(|(name, value)| (Some(name), value)).collect();
+                    let is_null = |value: &ExprRef| matches!(&**value, Expr::Name(name) if name == "\u{0}null");
+                    let mut callable = st.pop()?;
+                    if is_null(&callable) { callable = st.pop()?; }
+                    if st.last().map_or(false, is_null) { st.pop(); }
+                    st.push(Rc::new(Expr::Call {
+                        func: callable, args, keywords, star_args: None, star_kwargs: None,
                     }));
                 }
                 Op::BINARY_OP => {
@@ -31672,6 +31706,26 @@ return None;
             .unwrap_or(false);
         if let Some(comp) = &mut self.inline_comp {
             if self.cur_offset < comp.end {
+                // A 3.12+ value-preserving COPY guard inside an element
+                // is an and/or expression, rather than a comprehension
+                // filter. Its fall-through discards the copied left value.
+                if let Some(&index) = self.idx_of.get(&self.cur_offset) {
+                    let mut previous = index;
+                    while previous > 0 && matches!(self.instrs[previous - 1].op,
+                        Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    { previous -= 1; }
+                    let copied = previous > 0
+                        && self.instrs[previous - 1].op == Op::COPY
+                        && self.instrs[previous - 1].arg == 1;
+                    let discard = self.instrs[index + 1..].iter()
+                        .find(|instruction| !matches!(instruction.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                        .map_or(false, |instruction| instruction.op == Op::POP_TOP);
+                    if copied && discard && target > self.cur_offset && target < comp.end {
+                        comp.pending_merges.push((target, cond,
+                            Some(if jump_if_true { BoolOpKind::Or } else { BoolOpKind::And })));
+                        return;
+                    }
+                }
                 // element ternary guard: same recognition as the
                 // code-object builder (a forward JF between the jump
                 // and its target skips the else arm to a merge, both
@@ -31711,7 +31765,7 @@ return None;
                                     });
                                 }
                             } else {
-                                comp.pending_merges.push((m_off, cj));
+                                comp.pending_merges.push((m_off, cj, None));
                                 comp.tern_chain_t = Some(t_off);
                             }
                             return;
@@ -31721,9 +31775,12 @@ return None;
                 comp.tern_chain_t = None;
                 // 3.12+ inline filters come in two layouts:
                 // - INVERTED (same-line 3.12; ALL of 3.13/3.14): the
-                //   jump lands ON the append (target is
-                //   LIST_APPEND/SET_ADD/MAP_ADD/YIELD after pads) and
-                //   the fall-through is the skip back edge. The jump
+                //   jump accepts this filter, either at the next filter
+                //   or the append, while fall-through skips the item.
+                //   Recognize the exact pad/back-edge span first: scanning
+                //   from the target can encounter a later filter's skip
+                //   before reaching the append and invert this filter.
+                //   The jump
                 //   polarity IS the filter polarity: PJT->`if C`,
                 //   PJF->`if not C`.
                 // - CLASSIC (3.12 line-broken filters): PJF->shared
@@ -31740,7 +31797,22 @@ return None;
                 // loop TOP, and scanning from there would wrap around
                 // and find the append after the filter again
                 // (_py_abc 3.12 __new__ line-broken setcomp)
-                let target_is_append = target > self.cur_offset
+                let fallthrough_skips_item = self.version.at_least(3, 12)
+                    && target > self.cur_offset
+                    && target < comp.end
+                    && self.idx_of.get(&self.cur_offset).zip(self.idx_of.get(&target))
+                        .map_or(false, |(&ci, &ti)| {
+                            if ti <= ci { return false; }
+                            let mut significant = self.instrs[ci + 1..ti].iter()
+                                .filter(|x| !matches!(x.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE));
+                            significant.next().map_or(false, |x| {
+                                x.is_backward
+                                    && matches!(x.op, Op::JUMP_BACKWARD | Op::JUMP_BACKWARD_NO_INTERRUPT
+                                                | Op::JUMP_ABSOLUTE | Op::JUMP)
+                                    && x.target == comp.for_iter_offsets.last().copied()
+                            }) && significant.next().is_none()
+                        });
+                let target_accepts_item = fallthrough_skips_item || (target > self.cur_offset
                     && self
                     .idx_of
                     .get(&target)
@@ -31775,8 +31847,8 @@ return None;
                                         | Op::YIELD_VALUE
                                 )
                             })
-                    });
-                let c = if target_is_append {
+                    }));
+                let c = if target_accepts_item {
                     if jump_if_true {
                         cond
                     } else {
@@ -31796,7 +31868,7 @@ return None;
                     cond
                 };
                 if let Some(cur) = &mut comp.cur {
-                    if comp_if_break && !target_is_append {
+                    if comp_if_break && !target_accepts_item {
                         cur.if_break = true;
                     }
                     cur.ifs.push(c);
@@ -31809,10 +31881,30 @@ return None;
         // elif test would create a nested If at the same target, so keep
         // the Else open in that case.
         if let Some(top) = self.blocks.last() {
+            // A modern Else opened immediately after the then arm's
+            // unconditional skip has an authoritative finite span. A guard
+            // inside that span can share its merge without ending the Else:
+            // closing it here ejects the guarded query result and may read
+            // its local on the other arm before assignment. Keep older and
+            // inferred/try-else boundaries on their existing path.
+            let guarded_else_merge = self.version.at_least(3, 11)
+                && top.kind == BlockType::Else
+                && self.cur_offset > top.start
+                && self.cur_offset < top.end
+                && self.idx_of.get(&top.start).map_or(false, |&si| {
+                    si > 0 && {
+                        let skip = &self.instrs[si - 1];
+                        !skip.is_backward
+                            && skip.end() == top.start
+                            && skip.target == Some(top.end)
+                            && matches!(skip.op, Op::JUMP_FORWARD | Op::JUMP | Op::JUMP_ABSOLUTE)
+                    }
+                });
             if matches!(top.kind, BlockType::Else | BlockType::TryElse)
                 && top.end == target
                 && !top.is_elif
                 && self.cur_offset != top.start
+                && !guarded_else_merge
             {
                 self.close_blocks_at(target);
             }
@@ -33269,6 +33361,10 @@ if split_cond {
                         // `if c: continue`-style: fall through to the
                         // arm below that opens an If ending at that back
                         // edge instead of closing the loop here.
+                        // A prefixed loop top has the same identity here
+                        // as when matching the conditional above. Otherwise
+                        // a later edge to EXTENDED_ARG is missed and a
+                        // conditional continue prematurely closes the loop.
                         let loop_start0 = self.blocks[i].start;
                         let has_later_back_edge = self
                             .idx_of
@@ -33276,7 +33372,10 @@ if split_cond {
                             .map_or(false, |&ci0| {
                                 self.instrs.iter().skip(ci0 + 1).any(|ins| {
                                     ins.is_backward
-                                        && ins.target == Some(loop_start0)
+                                        && ins.target.map_or(false, |t| {
+                                            t == loop_start0
+                                                || self.is_loop_top_prefix(t, loop_start0)
+                                        })
                                         && matches!(
                                             ins.op,
                                             Op::JUMP_ABSOLUTE
@@ -33456,8 +33555,21 @@ if split_cond {
                                     }
                                     return;
                                 }
+                                // A forward conditional can skip this back
+                                // edge and land on the next one. Keep the
+                                // skipped edge inside its fall-through arm;
+                                // ending before it moves `continue` outside
+                                // the guard and changes the recompiled jumps.
+                                let body_end = if self.version.at_least(3, 11)
+                                    && raw_target == inst.end()
+                                    && self.is_loop_top_prefix(target, loop_start)
+                                {
+                                    inst.end()
+                                } else {
+                                    inst.start
+                                };
                                 let mut blk =
-                                    Block::new(BlockType::If, self.cur_next, inst.start);
+                                    Block::new(BlockType::If, self.cur_next, body_end);
                                 let c = if jump_if_true {
                                     negate_cond(cond.clone())
                                 } else {
@@ -42488,33 +42600,30 @@ fn simplify_not(e: ExprRef) -> ExprRef {
     }
 }
 
-/// 3.14: extended slices arrive as `slice(a, b, c)` calls or marshalled
-/// slice constants; normalize both to Expr::Slice.
+/// Extended indexes can contain actual marshalled slice constants. Preserve
+/// runtime slice calls: their global lookup may be shadowed or have effects.
 fn normalize_slice_call(idx: ExprRef) -> ExprRef {
+    normalize_slice_constant(idx)
+}
+
+/// Normalize actual marshalled slice values inside multi-axis indexes.
+/// A runtime `slice(...)` call must retain its global lookup and evaluation.
+fn normalize_slice_constant(idx: ExprRef) -> ExprRef {
     match &*idx {
-        Expr::Call { func, args, keywords, star_args: None, star_kwargs: None }
-            if keywords.is_empty()
-                && matches!(&**func, Expr::Name(n) if n == "slice")
-                && (2..=3).contains(&args.len())
-                // a starred operand (`slice(*argvals, None)`) cannot be a
-                // slice display — keep the call (yt-dlp jsinterp
-                // `obj[*argvals:]` was not valid source)
-                && args.iter().all(|a| !matches!(&**a, Expr::Starred(_))) =>
-        {
-            Rc::new(Expr::Slice(Box::new(SliceExpr {
-                start: none_if_const_none(args[0].clone()),
-                stop: none_if_const_none(args[1].clone()),
-                step: args.get(2).cloned().and_then(none_if_const_none),
-            })))
-        }
-        Expr::Const(o) => match &**o {
-            PyObject::Slice(a, b, c) => Rc::new(Expr::Slice(Box::new(SliceExpr {
-                start: none_if_const_const(a.clone()),
-                stop: none_if_const_const(b.clone()),
-                step: none_if_const_const(c.clone()),
+        Expr::Const(object) => match &**object {
+            PyObject::Slice(start, stop, step) => Rc::new(Expr::Slice(Box::new(SliceExpr {
+                start: none_if_const_const(start.clone()),
+                stop: none_if_const_const(stop.clone()),
+                step: none_if_const_const(step.clone()),
             }))),
+            PyObject::Tuple(values) if values.iter().any(|value| matches!(&**value, PyObject::Slice(_ , _, _))) =>
+                Rc::new(Expr::Tuple(values.iter().cloned()
+                    .map(|value| normalize_slice_constant(Rc::new(Expr::Const(value)))).collect())),
             _ => idx,
         },
+        Expr::Tuple(values) => Rc::new(Expr::Tuple(
+            values.iter().cloned().map(normalize_slice_constant).collect(),
+        )),
         _ => idx,
     }
 }
@@ -42585,9 +42694,39 @@ fn cmp_from_index(idx: usize) -> CmpOp {
 // =====================  stack events, calls, functions, classes  =====================
 
 impl<'a> Ctx<'a> {
+    fn discarded_unpack_target(&self, remaining: usize) -> ExprRef {
+        // Repeated local targets can have their earlier stores replaced by
+        // POP_TOP. Their names may then be obfuscated while the surviving
+        // store keeps its slot. Reuse the next direct local store's spelling:
+        // the compiler elides the duplicate instead of creating an extra `_`
+        // local. Do not cross nested unpacking, side effects or control flow.
+        let name = if self.version.at_least(3, 13) {
+            self.idx_of.get(&self.cur_offset).and_then(|&index| {
+                let mut discarded = 1usize;
+                for next in &self.instrs[index + 1..] {
+                    match next.op {
+                        Op::NOP | Op::CACHE | Op::EXTENDED_ARG | Op::NOT_TAKEN => {},
+                        Op::POP_TOP => {
+                            discarded += 1;
+                            if discarded >= remaining { return None; }
+                        }
+                        Op::STORE_FAST => return self.code.varnames.get(next.arg as usize).cloned(),
+                        Op::STORE_FAST_STORE_FAST | Op::STORE_FAST_LOAD_FAST => {
+                            return self.code.varnames.get(((next.arg >> 4) & 0xF) as usize).cloned();
+                        }
+                        Op::STORE_DEREF => return self.code.deref_name(next.arg as usize).map(str::to_string),
+                        _ => return None,
+                    }
+                }
+                None
+            })
+        } else { None };
+        self.name_expr(name.as_deref().unwrap_or("_"))
+    }
+
     fn handle_pop_top(&mut self) {
-        // 3.14 `_` elision: the compiler replaces the store of a
-        // throwaway `_` name inside a tuple unpack with a POP_TOP
+        // 3.13+ repeated-target elision: the compiler replaces an
+        // overwritten local store inside a tuple unpack with a POP_TOP
         // discarding that slot (UNPACK_SEQUENCE; POP_TOP;
         // STORE_FAST_STORE_FAST). The open unpack frame must consume
         // the slot as a placeholder target or the tuple never
@@ -42598,8 +42737,9 @@ impl<'a> Ctx<'a> {
             if *remaining > 0 {
                 let is_slot = matches!(self.stack.last(), Some(Sv::E(e)) if Rc::ptr_eq(e, fv));
                 if is_slot {
+                    let target = self.discarded_unpack_target(*remaining);
                     if let Some(Sv::E(_)) = self.stack.pop() {
-                        self.collect_unpack_target(self.name_expr("_"));
+                        self.collect_unpack_target(target);
                     }
                     return;
                 }
@@ -43282,6 +43422,12 @@ impl<'a> Ctx<'a> {
                     cur.target = Some(target);
                 }
                 comp.target_seen = true;
+                // UNPACK_SEQUENCE consumed the modeled iterator while
+                // collecting its tuple target. The VM keeps a distinct
+                // iterator slot until END_FOR/POP_ITER. Restore that slot,
+                // as the simple-target path already does, instead of
+                // suppressing cleanup for generators that still own one.
+                self.push(value);
                 return;
             }
         }
@@ -43965,6 +44111,24 @@ impl<'a> Ctx<'a> {
             .iter()
             .map(|x| (canon(x.op), x.arg))
             .collect();
+        // Masked runtime exits can leave padding between POP_EXCEPT and
+        // a return whose value was computed earlier. Padding is not a
+        // value-building tail: matching it against the mainline would
+        // swallow the actual response/call and resume with an empty stack.
+        // Look through padding, then require a real independent value head.
+        let head = tail.iter().find(|(op, _)| !matches!(
+            op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::EXTENDED_ARG | Op::RESUME
+        ));
+        let value_head = head.map_or(false, |(op, arg)| {
+            matches!(op, Op::LOAD_FAST | Op::LOAD_FAST_LOAD_FAST | Op::LOAD_NAME
+                | Op::LOAD_DEREF | Op::LOAD_CLASSDEREF | Op::LOAD_GLOBAL
+                | Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::LOAD_COMMON_CONSTANT)
+                || (*arg == 0 && matches!(op,
+                    Op::BUILD_TUPLE | Op::BUILD_LIST | Op::BUILD_SET | Op::BUILD_MAP))
+        });
+        if !value_head {
+            return None;
+        }
         // require a NON-DEGENERATE tail: at least one value op before
         // the RETURN. A lone RETURN_VALUE (the clause's value was
         // loaded+SWAPed UNDER the POP_EXCEPT, _collections_abc 3.12
@@ -47856,7 +48020,11 @@ impl<'a> Ctx<'a> {
                     _ => Vec::new(),
                 };
                 match &*other {
-                    Expr::Dict(d) => entries.extend(d.iter().cloned()),
+                    // A call expansion of a constructed dictionary keeps
+                    // that boundary. Flattening it into outer DICT_MERGE
+                    // entries would change its internal DICT_UPDATE's
+                    // overwrite semantics into duplicate-key errors.
+                    Expr::Dict(d) if inst.op == Op::DICT_UPDATE => entries.extend(d.iter().cloned()),
                     o => entries.push((
                         Rc::new(Expr::Starred(Rc::new(o.clone()))),
                         self.name_expr(""),
@@ -48674,7 +48842,7 @@ fn p649_leaked_gate(e: &ExprRef) -> Option<i64> {
 /// statements, recursively — conditional annotations (`if TYPE_CHECKING:
 /// x: T`) leave their markers inside the nested block. A marker directly
 /// after `name = value` merges into `name: T = value`.
-fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>) {
+fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>, class_scope: bool) {
     let mut i = 0;
     while i < stmts.len() {
         let gate = match &stmts[i] {
@@ -48700,6 +48868,20 @@ fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>) {
                     annotation: ent.ann.clone(),
                     value: merged,
                 };
+                // A class's annotation registration gate is compiler-visible
+                // even when its condition was constant-folded. An unconditional
+                // source block retains that registration without emitting a
+                // runtime condition. Plain AnnAssign would lose the cell and
+                // the annotation function's guarded entries on recompilation.
+                let ann_stmt = if class_scope {
+                    Stmt::If {
+                        cond: Rc::new(Expr::Const(Rc::new(PyObject::True))),
+                        body: vec![ann_stmt],
+                        orelse: vec![],
+                    }
+                } else {
+                    ann_stmt
+                };
                 if has_value {
                     stmts.remove(i - 1);
                     stmts[i - 1] = ann_stmt;
@@ -48714,26 +48896,47 @@ fn p649_restore_gates(stmts: &mut Vec<Stmt>, entries: &mut Vec<P649Entry>) {
             Stmt::If { body, orelse, .. }
             | Stmt::While { body, orelse, .. }
             | Stmt::For { body, orelse, .. } => {
-                p649_restore_gates(body, entries);
-                p649_restore_gates(orelse, entries);
+                p649_restore_gates(body, entries, class_scope);
+                p649_restore_gates(orelse, entries, class_scope);
             }
             Stmt::Try { body, handlers, orelse, finalbody, .. } => {
-                p649_restore_gates(body, entries);
+                p649_restore_gates(body, entries, class_scope);
                 for h in handlers.iter_mut() {
-                    p649_restore_gates(&mut h.body, entries);
+                    p649_restore_gates(&mut h.body, entries, class_scope);
                 }
-                p649_restore_gates(orelse, entries);
-                p649_restore_gates(finalbody, entries);
+                p649_restore_gates(orelse, entries, class_scope);
+                p649_restore_gates(finalbody, entries, class_scope);
             }
             _ => {}
         }
         i += 1;
     }
+    // Keep one readable registration block for consecutive gated fields.
+    // Each field still has its own compiler gate index in __annotate__.
+    if class_scope {
+        fn annotation_block(stmt: &Stmt) -> bool {
+            matches!(stmt, Stmt::If { cond, body, orelse }
+                if matches!(&**cond, Expr::Const(value) if matches!(&**value, PyObject::True))
+                    && orelse.is_empty() && !body.is_empty()
+                    && body.iter().all(|stmt| matches!(stmt, Stmt::AnnAssign { .. })))
+        }
+        let mut index = 1;
+        while index < stmts.len() {
+            if annotation_block(&stmts[index - 1]) && annotation_block(&stmts[index]) {
+                let Stmt::If { body: current, .. } = stmts.remove(index) else { unreachable!() };
+                if let Stmt::If { body, .. } = &mut stmts[index - 1] {
+                    body.extend(current);
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
 }
 
 /// 3.14 PEP 649: rebuild module/class-scope annotation statements from
 /// the compiler-generated `__annotate__` machinery (see P649Entry).
-fn restore_pep649_annotations(body: &mut Vec<Stmt>) {
+fn restore_pep649_annotations(body: &mut Vec<Stmt>, code: &CodeObject) {
     // 1) locate the pseudo def and extract its entries
     let mut entries: Vec<P649Entry> = Vec::new();
     let mut def_pos: Option<usize> = None;
@@ -48814,7 +49017,7 @@ fn restore_pep649_annotations(body: &mut Vec<Stmt>) {
 
     // 3) gated (module-scope) entries: replace their `{IDX}` markers,
     //    recursively through nested blocks
-    p649_restore_gates(body, &mut entries);
+    p649_restore_gates(body, &mut entries, code.name != "<module>" && code.flags & 1 == 0);
 
     // gated entries whose `{IDX}` marker never appeared were dead in the
     // executable flow (e.g. folded `if False:` bodies — the compiler drops
@@ -49023,7 +49226,7 @@ fn postprocess_body(mut body: Vec<Stmt>, code: &CodeObject, version: PythonVersi
     // `__annotate_func__`) instead of inline `__annotations__` subscript
     // stores. Restore them to AnnAssign statements and strip the
     // protocol remnants (see restore_pep649_annotations).
-    restore_pep649_annotations(&mut body);
+    restore_pep649_annotations(&mut body, code);
     // __module__ / __qualname__ / __doc__ handling for class bodies
     let mut idx = 0;
     while idx < body.len() {
@@ -50985,6 +51188,49 @@ impl<'a> Ctx<'a> {
 
 // =====================  comprehensions  =====================
 
+// The main statement parser already understands PEP 709's nested inline
+// comprehensions. Reuse it for generator elements instead of flattening an
+// inner dict/list/set comprehension into the generator's own clauses.
+fn generator_parts_from_body(
+    body: &[Stmt], generators: &mut Vec<Comprehension>,
+) -> Option<ExprRef> {
+    let mut result = None;
+    for statement in body {
+        match statement {
+            Stmt::For { target, iter, body, orelse, is_async } if orelse.is_empty() => {
+                if result.is_some() { return None; }
+                generators.push(Comprehension {
+                    target: target.clone(), iter: iter.clone(), ifs: Vec::new(),
+                    is_async: *is_async, if_line_break: false,
+                });
+                result = generator_parts_from_body(body, generators);
+                if result.is_none() { return None; }
+            }
+            Stmt::If { cond, body, orelse } if orelse.is_empty() => {
+                if result.is_some() { return None; }
+                generators.last_mut()?.ifs.push(cond.clone());
+                result = generator_parts_from_body(body, generators);
+                if result.is_none() { return None; }
+            }
+            Stmt::Expr(value) => {
+                match &**value {
+                    Expr::Yield(Some(value)) => {
+                        if result.is_some() { return None; }
+                        result = Some(value.clone());
+                    }
+                    Expr::Const(_) => {}, // Docstring.
+                    _ => return None,
+                }
+            }
+            Stmt::Pass | Stmt::Return(None) => {},
+            Stmt::Return(Some(value))
+                if matches!(&**value, Expr::Const(object) if matches!(&**object, PyObject::None)) => {},
+            _ => return None,
+        }
+    }
+    result
+}
+
 impl<'a> Ctx<'a> {
     /// Try to turn a completed call into a comprehension. The callee is a
     /// Function whose code object is named `<listcomp>` etc. The iterable is
@@ -51156,10 +51402,16 @@ fn genexpr_ternary_merge(
                 | Op::POP_JUMP_IF_TRUE
                 | Op::POP_JUMP_FORWARD_IF_FALSE
                 | Op::POP_JUMP_FORWARD_IF_TRUE
+                | Op::POP_JUMP_IF_NONE
+                | Op::POP_JUMP_IF_NOT_NONE
+                | Op::POP_JUMP_FORWARD_IF_NONE
+                | Op::POP_JUMP_FORWARD_IF_NOT_NONE
         )
     };
     let mut jf_target = None;
-    for x in instrs.iter().skip(ii + 1) {
+    let mut j = ii + 1;
+    while j < instrs.len() {
+        let x = instrs[j];
         if x.offset >= t {
             break;
         }
@@ -51176,6 +51428,18 @@ fn genexpr_ternary_merge(
             break;
         }
         if is_cj(x.op) && x.target == Some(t) && !x.is_backward {
+            j += 1;
+            continue;
+        }
+        // A then-arm value may itself contain a conditional dictionary or
+        // another ternary. Consume its complete, pure value region before
+        // searching for this arm's final jump, just as the else-arm does.
+        if is_cj(x.op) {
+            let nested_merge = Self::genexpr_ternary_merge(instrs, j)?;
+            if nested_merge > t {
+                return None;
+            }
+            j = instrs.iter().position(|item| item.offset == nested_merge)?;
             continue;
         }
         // 3.12+: TO_BOOL sits between the value run and the cond jump
@@ -51183,11 +51447,13 @@ fn genexpr_ternary_merge(
         // element rendered as a plain `x`, silently dropping the else
         // arm on EVERY version with the folded ternary shape)
         if matches!(x.op, Op::TO_BOOL | Op::NOP | Op::NOT_TAKEN | Op::CACHE) {
+            j += 1;
             continue;
         }
         if !Self::comp_arm_value_op(x.op) {
             return None;
         }
+        j += 1;
     }
     let m = jf_target?;
     let ti = instrs.iter().position(|x| x.offset == t)?;
@@ -51203,13 +51469,7 @@ fn genexpr_ternary_merge(
             j += 1;
             continue;
         }
-        if matches!(
-            x.op,
-            Op::POP_JUMP_IF_FALSE
-                | Op::POP_JUMP_IF_TRUE
-                | Op::POP_JUMP_FORWARD_IF_FALSE
-                | Op::POP_JUMP_FORWARD_IF_TRUE
-        ) {
+        if is_cj(x.op) {
             let nm = Self::genexpr_ternary_merge(instrs, j)?;
             let nmi = instrs.iter().position(|x2| x2.offset == nm)?;
             if nmi > mi {
@@ -51231,6 +51491,20 @@ fn genexpr_ternary_merge(
     ) -> Option<(ExprRef, Option<ExprRef>, Vec<Comprehension>)> {
         let table = table_for(self.version).ok()?;
         let instrs = crate::bytecode::decode_instructions(code, table, self.version);
+
+        if self.version.at_least(3, 12) && matches!(_kind, CompKind::Generator)
+            && instrs.iter().any(|instruction| instruction.op == Op::LOAD_FAST_AND_CLEAR)
+        {
+            if let Some(statements) = decompile(code, self.version).ok().filter(|result| result.clean) {
+                let mut generators = Vec::new();
+                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
+                    if !generators.is_empty() {
+                        generators[0].iter = outer_iter.clone();
+                        return Some((element, None, generators));
+                    }
+                }
+            }
+        }
 
         struct PartialGen {
             target: Option<ExprRef>,
@@ -51408,7 +51682,7 @@ fn genexpr_ternary_merge(
                         _ => Vec::new(),
                     };
                     match &*other {
-                        Expr::Dict(d) => entries.extend(d.iter().cloned()),
+                        Expr::Dict(d) if inst.op == Op::DICT_UPDATE => entries.extend(d.iter().cloned()),
                         o => entries.push((
                             Rc::new(Expr::Starred(Rc::new(o.clone()))),
                             Rc::new(Expr::Name(String::new())),
@@ -51879,8 +52153,19 @@ fn genexpr_ternary_merge(
                         let v = stack.pop().unwrap_or_else(|| Rc::new(Expr::Name("?".to_string())));
                         (k, v)
                     };
-                    key.get_or_insert(k);
-                    elt.get_or_insert(v);
+                    if self.version.at_least(3, 10) && inst.arg == 1 {
+                        // Large dict displays use MAP_ADD 1 even inside a
+                        // comprehension. They build its element, rather
+                        // than setting the enclosing comprehension's key.
+                        let dictionary = stack.pop()?;
+                        let Expr::Dict(entries) = &*dictionary else { return None; };
+                        let mut entries = entries.clone();
+                        entries.push((k, v));
+                        stack.push(Rc::new(Expr::Dict(entries)));
+                    } else {
+                        key.get_or_insert(k);
+                        elt.get_or_insert(v);
+                    }
                 }
                 Op::YIELD_VALUE => {
                     if let Some(p) = pending_or_filter.take() {
@@ -52911,20 +53196,22 @@ impl<'a> Ctx<'a> {
         // arm-skip JFs all land on the append): fold them all,
         // innermost (LAST recorded) first so the stack pairs line up
         while let Some(idx) = self.inline_comp.as_ref().and_then(|c| {
-            c.pending_merges.iter().rposition(|(m, _)| *m == offset)
+            c.pending_merges.iter().rposition(|(m, _, _)| *m == offset)
         }) {
-            let (_, cond) = self
+            let (_, cond, bool_op) = self
                 .inline_comp
                 .as_mut()
                 .map(|c| c.pending_merges.remove(idx))
                 .unwrap();
             let else_v = self.pop_expr();
-            let then_v = self.pop_expr();
-            self.push(Rc::new(Expr::Ternary {
-                cond,
-                then_expr: then_v,
-                else_expr: else_v,
-            }));
+            if let Some(op) = bool_op {
+                self.push(Rc::new(Expr::BoolOp { op, values: vec![cond, else_v] }));
+            } else {
+                let then_v = self.pop_expr();
+                self.push(Rc::new(Expr::Ternary {
+                    cond, then_expr: then_v, else_expr: else_v,
+                }));
+            }
         }
     }
 
@@ -53162,3 +53449,66 @@ mod comparison_tests;
 #[cfg(test)]
 #[path = "decompiler_stack_tests.rs"]
 mod stack_tests;
+
+#[cfg(test)]
+mod generator_parts_tests {
+    use super::*;
+
+    fn yielded_loop() -> Stmt {
+        Stmt::For {
+            target: Rc::new(Expr::Name("row".into())),
+            iter: Rc::new(Expr::Name("rows".into())),
+            body: vec![Stmt::Expr(Rc::new(Expr::Yield(Some(Rc::new(
+                Expr::Name("row".into()),
+            )))))],
+            orelse: vec![],
+            is_async: false,
+        }
+    }
+
+    #[test]
+    fn extraction_preserves_one_yield_path_and_rejects_siblings() {
+        let body = vec![yielded_loop()];
+        let mut generators = Vec::new();
+        let element = generator_parts_from_body(&body, &mut generators).unwrap();
+        assert!(matches!(&*element, Expr::Name(name) if name == "row"));
+        assert_eq!(generators.len(), 1);
+
+        let mut generators = Vec::new();
+        assert!(generator_parts_from_body(
+            &[yielded_loop(), yielded_loop()], &mut generators,
+        ).is_none());
+
+        let branch = Stmt::If {
+            cond: Rc::new(Expr::Name("ready".into())),
+            body: vec![Stmt::Expr(Rc::new(Expr::Yield(Some(Rc::new(
+                Expr::Name("row".into()),
+            )))))],
+            orelse: vec![],
+        };
+        let mut body = yielded_loop();
+        if let Stmt::For { body, .. } = &mut body {
+            *body = vec![branch.clone(), branch];
+        }
+        assert!(generator_parts_from_body(&[body], &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn extraction_does_not_discard_assignments_or_loop_else() {
+        for name in ["saved", "__assert_armored__"] {
+            let assignment = Stmt::Assign {
+                targets: vec![Rc::new(Expr::Name(name.into()))],
+                value: Rc::new(Expr::Const(Rc::new(PyObject::None))),
+                wrap_before: vec![],
+            };
+            assert!(generator_parts_from_body(
+                &[assignment, yielded_loop()], &mut Vec::new(),
+            ).is_none());
+        }
+        let mut body = yielded_loop();
+        if let Stmt::For { orelse, .. } = &mut body {
+            *orelse = vec![Stmt::Pass];
+        }
+        assert!(generator_parts_from_body(&[body], &mut Vec::new()).is_none());
+    }
+}
