@@ -825,3 +825,37 @@ fn independent_lookup_guards_keep_assignment_and_return_inside_the_loop() {
         assert!(!src.contains("value.rating >="), "{fixture}: comparison inverted");
     }
 }
+
+#[test]
+fn python315_shapes_recover_changed_encodings() {
+    // 3.15 changed the inline-comprehension layout, IMPORT_NAME packing,
+    // LOAD_COMMON_CONSTANT, yield-from, loop-return cleanup, genexpr
+    // call slots and with as-targets. All of these are regressions that
+    // the 3.14-only fixtures cannot see.
+    let (src, clean) = decompile_fixture("python315_shapes.3.15.pyc");
+    assert!(clean, "3.15 shapes: output marked incomplete:\n{src}");
+    assert_contains(
+        &src,
+        &[
+            "import os.path",
+            "from os.path import join",
+            "[x * 2 for x in xs], {x for x in xs}, {x: x + 1 for x in xs}",
+            "fn(x, alphas=1, X_test=x, mode=2, max_iter=int(",
+            "fn(x, x if x > 1 else 0)",
+            "if not any((s in p for s in ['.a', '.b']))",
+            "tuple((tuple((s for s in row)) for row in rows))",
+            "for i in range(3):",
+            "return 'hit%d' % i",
+            "yield from xs",
+            "if v is True:",
+            "if v is False:",
+            "if v is None:",
+            "return -1",
+            "with ctx as holder.value:",
+            "with ctx as holder['k']:",
+        ],
+        "3.15 shapes",
+    );
+    assert!(!src.contains("/*with-result*/"), "unresolved with target:\n{src}");
+    assert!(!src.contains('\0'), "PUSH_NULL marker leaked:\n{src}");
+}

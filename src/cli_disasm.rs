@@ -21,9 +21,9 @@ resolution. Supports Python 2.0 - 3.15 (CPython, PyPy and others).
 Repository: https://github.com/ejfkdev/pycdc
 
 Usage:
-  pycdas [OPTIONS] <INPUT>...    disassemble .pyc/.pyo files or directories
-  pycdas version                 print version information
-  pycdas help                    print this help
+  {prog} [OPTIONS] <INPUT>...    disassemble .pyc/.pyo files or directories
+  {prog} version                 print version information
+  {prog} help                    print this help
 
 Arguments:
   <INPUT>...                     one or more .pyc/.pyo files, directories
@@ -44,13 +44,13 @@ Options:
   -V, --version          print version information
 
 Examples:
-  pycdas program.pyc                 disassemble a file to stdout
-  pycdas program.pyc -o program.dis  disassemble into a specific file
-  pycdas app/ -o out/                disassemble a directory tree,
+  {prog} program.pyc                 disassemble a file to stdout
+  {prog} program.pyc -o program.dis  disassemble into a specific file
+  {prog} app/ -o out/                disassemble a directory tree,
                                      mirroring its layout (.pyc -> .dis)
-  pycdas -q app/ -j 8 -o out/        quiet batch, 8 parallel workers
-  cat program.pyc | pycdas -         disassemble from stdin
-  pycdas -v 3.8 data.marshal         disassemble raw marshal data as 3.8
+  {prog} -q app/ -j 8 -o out/        quiet batch, 8 parallel workers
+  cat program.pyc | {prog} -         disassemble from stdin
+  {prog} -v 3.8 data.marshal         disassemble raw marshal data as 3.8
 
 Output:
   * one input file (or -) without -o:  printed to stdout

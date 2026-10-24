@@ -12,7 +12,7 @@
 
 ```sh
 pycdc program.pyc          # 反编译到标准输出
-pycdas program.pyc         # 反汇编（异常表、行号、嵌套 code object）
+pycdc dis program.pyc      # 反汇编（异常表、行号、嵌套 code object）
 ```
 
 ## 亮点
@@ -72,9 +72,10 @@ cat program.pyc | pycdc -
 pycdc -v 3.8 payload.marshal
 
 # 反汇编——与 pycdc 相同的 CLI 能力（文件/目录/stdin、-o/-j/-q）
+pycdc dis program.pyc
+pycdc dis ./pyc-corpus -o ./dis-out # 镜像生成 .dis 文件
+# 独立的 `pycdas` 二进制保留为兼容别名，输出逐字节一致
 pycdas program.pyc
-pycdc dis program.pyc            # 与 pycdas 输出完全一致
-pycdas ./pyc-corpus -o ./dis-out # 镜像生成 .dis 文件
 ```
 
 全部参数见 `pycdc --help`、`pycdc dis --help`、`pycdas --help`。退出码：`0` 成功，

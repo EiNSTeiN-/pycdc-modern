@@ -4,7 +4,7 @@ All notable changes to pycdc-rs. The full verification baseline for every
 release: 528-module stdlib corpus (semantic 528/528) + behavior matrix +
 cargo tests, on 14 interpreters (2.6–3.15).
 
-## Unreleased
+## v0.7.0 — 2026-10-24
 
 ### Python 3.15
 - `tools/gen_configs.py` now generates 3.15 from the live interpreter

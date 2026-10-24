@@ -12,7 +12,7 @@ Decompile and disassemble Python bytecode (`.pyc`) from **Python 2.0 through 3.1
 
 ```sh
 pycdc program.pyc          # decompile to stdout
-pycdas program.pyc         # disassemble (exception tables, line numbers, nested code)
+pycdc dis program.pyc      # disassemble (exception tables, line numbers, nested code)
 ```
 
 ## Highlights
@@ -72,11 +72,12 @@ pycdc ./pyc-corpus -o ./src-out -q -j 8
 # raw marshal (no pyc header) with an explicit version
 pycdc -v 3.8 payload.marshal
 
-# disassembly — same CLI surface (files, dirs, stdin, -o/-j/-q);
-# also reachable as the `pycdc dis` subcommand (identical output)
-pycdas program.pyc
+# disassembly — same CLI surface (files, dirs, stdin, -o/-j/-q)
 pycdc dis program.pyc
-pycdas ./pyc-corpus -o ./dis-out # -> mirrored .dis files
+pycdc dis ./pyc-corpus -o ./dis-out # -> mirrored .dis files
+# the standalone `pycdas` binary is kept as a compatibility alias
+# with byte-identical output
+pycdas program.pyc
 ```
 
 `pycdc --help`, `pycdc dis --help` and `pycdas --help` document every

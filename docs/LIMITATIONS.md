@@ -34,6 +34,26 @@ the body). Attribute and subscript as-targets (`with c as h.attr:`,
 语料之外仍有一个 3.15 边角：`with` 体只有 `return <expr>` 时
 （`with c as x: return x`）体会渲染成 `pass` 并丢失返回值。
 
+## Class bodies with conditional method definitions (3.14/3.15)
+
+A class body that defines methods inside an `if`/`else` (a common
+`TYPE_CHECKING`/platform-switch idiom) loses the `else` arm and renders a
+compiler-generated `return` at class scope, which is not valid Python:
+
+```python
+class Result:
+    if flag:
+        def method(self): return 1
+    else:
+        def method(self): return 2
+```
+
+The class-body epilogue (`LOAD None; RETURN_VALUE`) duplicates into each
+branch; the decompiler treats the first one as a terminating return. The
+shape does not occur in the 528-module stdlib corpus, the 6411-module
+real-world corpus or the behavior matrix. Visible invalid output is kept
+rather than silently dropping the `else`.
+
 ## try / except / finally
 
 - 3.11+ rebuilds from the exception table (except*, nested chains,

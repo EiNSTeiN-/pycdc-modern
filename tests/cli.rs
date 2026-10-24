@@ -166,6 +166,10 @@ fn dis_help_mentions_subcommand_form() {
     let (so, _, st) = run(&["dis", "--help"]);
     assert!(st.success());
     assert!(so.starts_with("pycdc dis "), "dis help header: {so}");
+    assert!(
+        so.contains("pycdc dis [OPTIONS]") && !so.contains("pycdas [OPTIONS]"),
+        "dis help must use the subcommand form in usage:\n{so}"
+    );
     let (so, _, st) = run(&["--help"]);
     assert!(st.success() && so.contains("pycdc dis"), "top help lacks dis: {so}");
 }
