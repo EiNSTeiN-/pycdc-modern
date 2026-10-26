@@ -32,6 +32,19 @@ pycdc dis program.pyc      # 反汇编（异常表、行号、嵌套 code object
 brew install ejfkdev/tap/pycdc
 ```
 
+**Scoop（Windows）：**
+
+```powershell
+scoop install https://raw.githubusercontent.com/ejfkdev/scoop-bucket/main/bucket/pycdc.json
+```
+
+清单会按 x64 / arm64 自动选择，并同时安装 `pycdc` 与 `pycdas`。若想按名称安装，先添加一次 bucket：
+
+```powershell
+scoop bucket add ejfkdev https://github.com/ejfkdev/scoop-bucket
+scoop install pycdc
+```
+
 **cargo，来自 [crates.io](https://crates.io/crates/pycdc)：**
 
 ```sh

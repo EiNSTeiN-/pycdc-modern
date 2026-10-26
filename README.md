@@ -32,6 +32,20 @@ pycdc dis program.pyc      # disassemble (exception tables, line numbers, nested
 brew install ejfkdev/tap/pycdc
 ```
 
+**Scoop (Windows):**
+
+```powershell
+scoop install https://raw.githubusercontent.com/ejfkdev/scoop-bucket/main/bucket/pycdc.json
+```
+
+The manifest selects x64 or arm64 automatically and installs both `pycdc`
+and `pycdas`. To install by name instead, add the bucket once:
+
+```powershell
+scoop bucket add ejfkdev https://github.com/ejfkdev/scoop-bucket
+scoop install pycdc
+```
+
 **cargo, from [crates.io](https://crates.io/crates/pycdc):**
 
 ```sh
