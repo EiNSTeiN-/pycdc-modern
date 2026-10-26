@@ -4,6 +4,35 @@ All notable changes to pycdc-rs. The full verification baseline for every
 release: 528-module stdlib corpus (semantic 528/528) + behavior matrix +
 cargo tests, on 14 interpreters (2.6–3.15).
 
+## v0.8.0 — 2026-10-26
+
+### `--cure`: optional simplification and formatting
+- New opt-in flag `pycdc --cure` runs the decompiled source through
+  [`cure`](https://github.com/ejfkdev/cure) (MIT), linked in-process — no
+  external binary and still no Python at runtime. It folds early-return
+  guards and if/else assignments into ternaries, removes redundant
+  parentheses, normalizes quote style and reflows formatting.
+- Measured on the full real-world corpus (6411 modules, seven projects):
+  0 parse errors and 0 recompile errors that were not already present in
+  the default output; 1 690 169 → 1 528 230 lines (−9.58%). On the
+  528-module stdlib corpus every cured module still compiles under its
+  own interpreter (no syntax errors, no incompleteness markers).
+- The default path is untouched: pycdc's verified output stays byte-for-byte
+  as before, and `--cure` can only replace it when the whole module parses
+  cleanly. Sources mentioning compiler introspection metadata
+  (`__annotate__`, `co_freevars`, `__conditional_annotations__`,
+  `__classdict__`) are emitted unchanged, because folding the annotation
+  registration gates changes `__annotate__.__code__.co_freevars` at runtime.
+- `src/simplify.rs` wraps the zero-dependency `cure` crates
+  (`cure-engine`, `cure-python-parser`, `cure-python-simplify`,
+  `cure-python-print`, plus `cure-python-ast` transitively) behind a
+  `simplify_python(&str) -> Option<String>` fallible API.
+- `tools/run_behavior.py --cure` runs the behavior matrix through the new
+  pass: **663/663 = 100%** with and without it. `tools/verify_corpus.py
+  --cure` repeats the corpus run into `out-cure/` + `report-cure.json`,
+  leaving the default baseline intact.
+- MSRV raised 1.70 → 1.74 (required by cure).
+
 ## v0.7.0 — 2026-10-24
 
 ### Python 3.15

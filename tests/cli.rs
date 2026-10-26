@@ -173,3 +173,22 @@ fn dis_help_mentions_subcommand_form() {
     let (so, _, st) = run(&["--help"]);
     assert!(st.success() && so.contains("pycdc dis"), "top help lacks dis: {so}");
 }
+
+#[test]
+fn cure_flag_simplifies_clean_output() {
+    // The 3.15 fixture has an if/return chain; cure folds it into a
+    // ternary and compacts the formatting. The default output must stay
+    // unchanged.
+    let plain = run(&["tests/pyc/python315_shapes.3.15.pyc"]);
+    assert!(plain.2.success());
+    assert!(plain.0.contains("if v is True:"), "{}", plain.0);
+    let cured = run(&["--cure", "tests/pyc/python315_shapes.3.15.pyc"]);
+    assert!(cured.2.success());
+    assert!(cured.1.is_empty(), "unexpected stderr: {}", cured.1);
+    assert!(
+        cured.0.contains("return 1 if v is True else"),
+        "cured output not simplified:\n{}",
+        cured.0
+    );
+    assert!(cured.0.len() < plain.0.len(), "cure should compact output");
+}

@@ -39,6 +39,9 @@ Options:
   -q, --quiet            batch mode: suppress the per-file src -> dst
                          lines (errors still print)
       --opcodes <DIR>    load extra/override opcode config JSONs
+      --cure             simplify and format the decompiled Python with
+                         the `cure` engine (opt-in; keeps pycdc's
+                         verified output by default)
   -c                     accepted for compatibility; raw-marshal input is
                          selected by -v alone
   -v <X.Y>               treat the input as raw marshal data for version
@@ -54,6 +57,7 @@ Examples:
   pycdc -q app/ -j 8 -o out/         quiet batch, 8 parallel workers
   cat program.pyc | pycdc -          decompile from stdin
   pycdc -v 3.8 data.marshal          decompile raw marshal data as 3.8
+  pycdc --cure program.pyc           simplified, idiomatic Python out
   pycdc dis program.pyc              disassemble (see `pycdc dis --help`)
 
 Input:
@@ -112,6 +116,7 @@ struct Cli {
     version_override: Option<(u8, u8)>,
     jobs: Option<usize>,
     quiet: bool,
+    cure: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
@@ -122,6 +127,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         version_override: None,
         jobs: None,
         quiet: false,
+        cure: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -148,6 +154,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                 }
             }
             "-q" | "--quiet" => cli.quiet = true,
+            "--cure" => cli.cure = true,
             "-c" => {}
             "-v" => {
                 i += 1;
@@ -204,6 +211,7 @@ fn collect_pycs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 fn decompile_file(
     file: &Path,
     version_override: Option<(u8, u8)>,
+    cure: bool,
 ) -> Result<String, String> {
     let data = loader::read_input(file)
         .map_err(|e| format!("{}: error: {e}", file.display()))?;
@@ -211,7 +219,16 @@ fn decompile_file(
         .map_err(|e| format!("{}: error: {e}", file.display()))?;
     let d = decompile(&loaded.code, loaded.version)
         .map_err(|e| format!("{}: decompile error: {e}", file.display()))?;
-    let text = generate(&d.body, loaded.version, d.clean);
+    let mut text = generate(&d.body, loaded.version, d.clean);
+    if cure && d.clean {
+        match pycdc::simplify::simplify_python(&text) {
+            Some(simplified) => text = simplified,
+            None => eprintln!(
+                "{}: cure: skipped, keeping pycdc output",
+                file.display()
+            ),
+        }
+    }
     if !d.clean {
         eprintln!(
             "{}: WARNING: decompilation incomplete (Python {})",
@@ -323,7 +340,7 @@ fn main() -> ExitCode {
 
 fn run_stdout(cli: &Cli) -> ExitCode {
     let file = &cli.inputs[0];
-    match decompile_file(file, cli.version_override) {
+    match decompile_file(file, cli.version_override, cli.cure) {
         Ok(text) => {
             print_stdout(&text);
             ExitCode::SUCCESS
@@ -398,7 +415,7 @@ fn run_batch(cli: &Cli) -> ExitCode {
     // run_job: decompile + write one job; the per-job message is returned
     // instead of printed so batch output stays in deterministic order.
     let run_job = |job: &Job| -> Result<String, String> {
-        let text = decompile_file(&job.src, cli.version_override)?;
+        let text = decompile_file(&job.src, cli.version_override, cli.cure)?;
         let mut text = text;
         if !text.ends_with('\n') {
             text.push('\n');

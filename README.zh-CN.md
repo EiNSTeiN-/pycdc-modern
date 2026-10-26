@@ -8,7 +8,7 @@
 [![Behavior](https://img.shields.io/badge/behavior-663%2F663-brightgreen.svg)](#验证)
 [![Built with ZCode](https://img.shields.io/badge/Built%20with%20ZCode-000000.svg?style=flat&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMTgiIGhlaWdodD0iMTAwIiB2aWV3Qm94PSIwIDAgMjU2IDIxOCI+PHBhdGggZmlsbD0iI2ZmZmZmZiIgZD0iTTEzNC40IDAuMTMwMTUyTDExNi40OCAyNS42MDIyQzExMy42NjUgMjkuNTY5OSAxMDkuMDU0IDMyLjAwMTkgMTA0LjA2NCAzMi4wMDE5SDYuMzk5OVYwQzYuMzk5OSAwLjEzMDE0OSAxMzQuNCAwLjEzMDE1MiAxMzQuNCAwLjEzMDE1MloiLz48cGF0aCBmaWxsPSIjZmZmZmZmIiBkPSJNMjU2IDAuMTMwMTI3TDEwMi40MDEgMjE3LjczMkgwTDE1My41OTkgMC4xMzAxMjdIMjU2WiIvPjxwYXRoIGZpbGw9IiNmZmZmZmYiIGQ9Ik0xMjEuNjAxIDIxNy43MzJMMTM5LjY1IDE5Mi4xMzRDMTQyLjQ2NSAxODguMTY2IDE0Ny4wNzYgMTg1LjczNCAxNTIuMDY3IDE4NS43MzRIMjQ5LjYwNFYyMTcuNzM2SDEyMS42MDFWMjE3LjczMloiLz48L3N2Zz4=)](https://zcode.z.ai/)
 
-用 Rust 编写的 Python 字节码反编译器与反汇编器：把 **Python 2.0 – 3.15** 的 `.pyc` 还原为可读源码。仅三个依赖，运行不需要 Python。
+用 Rust 编写的 Python 字节码反编译器与反汇编器：把 **Python 2.0 – 3.15** 的 `.pyc` 还原为可读源码。运行不需要 Python，另可选内置的 [`cure`](https://github.com/ejfkdev/cure) 简化器。
 
 ```sh
 pycdc program.pyc          # 反编译到标准输出
@@ -20,6 +20,7 @@ pycdc dis program.pyc      # 反汇编（异常表、行号、嵌套 code object
 - 14 个解释器（2.6–3.15）、528 个真实标准库模块语料上**语义等价 100%**，其中 76.9% 达到字节码签名级完全一致
 - **行为矩阵 663/663 = 100%**：2.6–3.15 全部通过（含 3.15 新字节码编码）
 - 现代语法：PEP 695/696 类型参数、PEP 750 t-string、PEP 649 延迟注解、match/case、海象运算符、async、f-string
+- 可选 `--cure`：在进程内调用 `cure` 简化器/格式化器（无需外部二进制、不依赖 Python），把 `if cond: return a` / `return b` 折成 `return a if cond else b`，行数约减少 10%
 - 版本差异全部数据化：每版本一张内嵌 opcode 表，`--opcodes` 可外部覆盖
 - 优雅降级：无法识别的构造输出注释占位，绝不崩溃
 
@@ -76,7 +77,28 @@ pycdc dis program.pyc
 pycdc dis ./pyc-corpus -o ./dis-out # 镜像生成 .dis 文件
 # 独立的 `pycdas` 二进制保留为兼容别名，输出逐字节一致
 pycdas program.pyc
+
+# 可选的简化/格式化（进程内链接 cure）
+pycdc --cure program.pyc
 ```
+
+`--cure` 是可选的美化步骤：pycdc 的默认输出本身已通过验证，因此默认
+行为不变。开启后条件分支会折叠为三元表达式、引号统一为单引号、版式重排：
+
+```python
+# 默认                                      # --cure
+def classify(v):                            def classify(v):
+    if v is True:                               return 1 if v is True else 0
+        return 1
+    return 0
+```
+
+若输入无法被 `cure` 解析，或含有编译器内省元数据（`__annotate__`、
+`co_freevars`、`__conditional_annotations__`、`__classdict__`）——简化这些
+内容可能改变运行语义——该文件会原样输出，并在 stderr 给出提示。行为矩阵
+在开启/关闭 `--cure` 两种情况下均为 663/663；528 个语料模块在开启后也全部
+仍能在各自解释器下编译。由于该步骤会刻意改写语句形态（if/else → 三元），
+语料的字节码签名指标对 `--cure` 输出不具参考意义，请以行为矩阵为准。
 
 全部参数见 `pycdc --help`、`pycdc dis --help`、`pycdas --help`。退出码：`0` 成功，
 `1` 存在处理失败的文件，`2` 用法错误。
@@ -147,7 +169,7 @@ click/attrs/pluggy）。详细已知缺口与第三方长尾队列见
 ## 项目结构
 
 ```
-src/    loader → marshal → bytecode → decompiler → codegen（version.rs/opcode.rs 承载版本数据）
+src/    loader → marshal → bytecode → decompiler → codegen（version.rs/opcode.rs 承载版本数据；simplify.rs 封装 cure）
 configs/ 内嵌 opcode 表与 magic 表（重生成: tools/gen_configs.py）
 tools/   配置生成、语料构建、验证设施
 tests/   Rust 测试、fixture、520 模块语料、48 行为用例
@@ -155,7 +177,7 @@ tests/   Rust 测试、fixture、520 模块语料、48 行为用例
 
 ## 致谢
 
-设计参考 [Decompyle++ (pycdc)](https://github.com/zrax/pycdc)、[uncompyle6/decompyle3](https://github.com/rocky/python-decompyle3) 与 [xdis](https://github.com/rocky/python-xdis)。
+设计参考 [Decompyle++ (pycdc)](https://github.com/zrax/pycdc)、[uncompyle6/decompyle3](https://github.com/rocky/python-decompyle3) 与 [xdis](https://github.com/rocky/python-xdis)；可选的 `--cure` 后处理由 [cure](https://github.com/ejfkdev/cure) 提供。
 
 ## License
 

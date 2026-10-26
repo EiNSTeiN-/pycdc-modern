@@ -19,7 +19,10 @@ Verdicts:
 
 Usage:
   python3 tools/verify_corpus.py [--version X.Y[.Z]] [--module NAME]
-                                 [--pycdc PATH] [--jobs N] [--quiet]
+                                 [--pycdc PATH] [--jobs N] [--cure] [--quiet]
+
+`--cure` repeats the run with `pycdc --cure` and writes out-cure/ +
+report-cure.json, leaving the default baseline in out/ + report.json intact.
 """
 import argparse
 import glob
@@ -91,12 +94,13 @@ def sig_of(interp, pyc_path):
     return p.stdout, None
 
 
-def verify_module(interp, pycdc, vdir, pyc, outdir, keep):
+def verify_module(interp, pycdc, vdir, pyc, outdir, keep, cure=False):
     name = os.path.basename(pyc)[:-4]
     out_py = os.path.join(outdir, name + ".py")
     result = {"module": name}
     # 1. decompile
-    p = subprocess.run([pycdc, pyc], capture_output=True, text=True)
+    cmd = [pycdc] + (["--cure"] if cure else []) + [pyc]
+    p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         result["verdict"] = "DEC-ERR"
         result["detail"] = (p.stderr or "")[-300:]
@@ -179,6 +183,10 @@ def main():
     ap.add_argument("--module", help="only modules whose name contains this")
     ap.add_argument("--pycdc", default=DEFAULT_PYCDC)
     ap.add_argument("--jobs", type=int, default=6)
+    ap.add_argument("--cure", action="store_true",
+                    help="decompile with `pycdc --cure`; outputs go to "
+                         "out-cure/ and report-cure.json so the default "
+                         "baseline is not overwritten")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -207,12 +215,13 @@ def main():
             summary[vd] = {"verdict": "NO-INTERP", "count": len(pycs)}
             print("%-10s NO-INTERP (%d pycs)" % (vd, len(pycs)))
             continue
-        outdir = os.path.join(vdir, "out")
+        outdir = os.path.join(vdir, "out" + ("-cure" if args.cure else ""))
         os.makedirs(outdir, exist_ok=True)
         results = []
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
             futs = [
-                ex.submit(verify_module, interp, args.pycdc, vdir, p, outdir, True)
+                ex.submit(verify_module, interp, args.pycdc, vdir, p, outdir,
+                          True, args.cure)
                 for p in pycs
             ]
             for f in futs:
@@ -230,7 +239,8 @@ def main():
                         r["module"], r["verdict"],
                         (r.get("detail", "") or "").splitlines()[0][:110]
                         if r.get("detail") else ""))
-        with open(os.path.join(vdir, "report.json"), "w") as f:
+        with open(os.path.join(vdir, "report%s.json"
+                               % ("-cure" if args.cure else "")), "w") as f:
             json.dump(sanitize_paths(
                 {"version": vd, "interp": interp, "counts": counts,
                  "results": results}), f, indent=1)
@@ -255,7 +265,8 @@ def main():
         sem = good + tot.get("AST-PASS", 0)
         print("strict pass rate: %d/%d = %.1f%%" % (good, n, 100.0 * good / n))
         print("semantic pass rate (PASS+AST-PASS): %d/%d = %.1f%%" % (sem, n, 100.0 * sem / n))
-    with open(os.path.join(CORPUS, "summary.json"), "w") as f:
+    with open(os.path.join(CORPUS, "summary%s.json"
+                          % ("-cure" if args.cure else "")), "w") as f:
         json.dump(sanitize_paths(
             {vd: {k: v for k, v in s.items() if k != "results"}
              for vd, s in summary.items()}), f, indent=1)

@@ -13,6 +13,7 @@ pub mod cli_disasm;
 pub mod code;
 pub mod codegen;
 pub mod decompiler;
+pub mod simplify;
 pub mod disasm;
 pub mod error;
 pub mod linetable;

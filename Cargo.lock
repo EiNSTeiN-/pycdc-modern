@@ -3,6 +3,46 @@
 version = 4
 
 [[package]]
+name = "cure-engine"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62cce97ba722529a2f010137e1221100e39e5b81796ba5b7c9bed63e0f6b73bc"
+
+[[package]]
+name = "cure-python-ast"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d835f8f2f074758baa5f2c6ce262d48e802bcfc48750df1642f6aa833e7998d2"
+
+[[package]]
+name = "cure-python-parser"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "293656f8e8a6eaa2d23312e5f7a560fb7975953de7e57046c122587e31843ebd"
+dependencies = [
+ "cure-python-ast",
+]
+
+[[package]]
+name = "cure-python-print"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a239060b735d125132068a82f043173e62d52bebb4166b34a0433e4743f2c144"
+dependencies = [
+ "cure-python-ast",
+]
+
+[[package]]
+name = "cure-python-simplify"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37dc4609a7334c5905e7e257f23ac4dcd3fd165cc820e1ad10ef9ddfe72df14e"
+dependencies = [
+ "cure-engine",
+ "cure-python-ast",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -25,8 +65,12 @@ dependencies = [
 
 [[package]]
 name = "pycdc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "cure-engine",
+ "cure-python-parser",
+ "cure-python-print",
+ "cure-python-simplify",
  "serde",
  "serde_json",
  "thiserror",

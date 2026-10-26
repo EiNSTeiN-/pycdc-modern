@@ -96,7 +96,7 @@ def run_py(interp, path, cwd):
         return -99, "", "timeout"
 
 
-def run_case(interp, ver, pycdc, case_path, keep):
+def run_case(interp, ver, pycdc, case_path, keep, cure=False):
     name = os.path.basename(case_path)[:-3]
     res = {"case": name, "version": ver}
     with tempfile.TemporaryDirectory() as td:
@@ -114,7 +114,8 @@ def run_case(interp, ver, pycdc, case_path, keep):
             res["detail"] = "compile failed"
             return res
         # 3. decompile
-        d = subprocess.run([pycdc, pyc], capture_output=True, text=True,
+        cmd = [pycdc] + (["--cure"] if cure else []) + [pyc]
+        d = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=120)
         if d.returncode != 0:
             res["verdict"] = "DECOMP-ERR"
@@ -158,6 +159,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--json", help="write results json here")
+    ap.add_argument("--cure", action="store_true",
+                    help="pass --cure to pycdc (simplify decompiled output)")
     args = ap.parse_args()
 
     interps = find_interpreters()
@@ -177,7 +180,8 @@ def main():
                 continue
             tasks.append(c)
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-            futs = [ex.submit(run_case, interp, ver, args.pycdc, c, False)
+            futs = [ex.submit(run_case, interp, ver, args.pycdc, c, False,
+                              args.cure)
                     for c in tasks]
             for f in futs:
                 results.append(f.result())

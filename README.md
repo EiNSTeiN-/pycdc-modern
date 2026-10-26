@@ -8,7 +8,7 @@ English | [简体中文](README.zh-CN.md)
 [![Behavior](https://img.shields.io/badge/behavior-663%2F663-brightgreen.svg)](#verification)
 [![Built with ZCode](https://img.shields.io/badge/Built%20with%20ZCode-000000.svg?style=flat&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMTgiIGhlaWdodD0iMTAwIiB2aWV3Qm94PSIwIDAgMjU2IDIxOCI+PHBhdGggZmlsbD0iI2ZmZmZmZiIgZD0iTTEzNC40IDAuMTMwMTUyTDExNi40OCAyNS42MDIyQzExMy42NjUgMjkuNTY5OSAxMDkuMDU0IDMyLjAwMTkgMTA0LjA2NCAzMi4wMDE5SDYuMzk5OVYwQzYuMzk5OSAwLjEzMDE0OSAxMzQuNCAwLjEzMDE1MiAxMzQuNCAwLjEzMDE1MloiLz48cGF0aCBmaWxsPSIjZmZmZmZmIiBkPSJNMjU2IDAuMTMwMTI3TDEwMi40MDEgMjE3LjczMkgwTDE1My41OTkgMC4xMzAxMjdIMjU2WiIvPjxwYXRoIGZpbGw9IiNmZmZmZmYiIGQ9Ik0xMjEuNjAxIDIxNy43MzJMMTM5LjY1IDE5Mi4xMzRDMTQyLjQ2NSAxODguMTY2IDE0Ny4wNzYgMTg1LjczNCAxNTIuMDY3IDE4NS43MzRIMjQ5LjYwNFYyMTcuNzM2SDEyMS42MDFWMjE3LjczMloiLz48L3N2Zz4=)](https://zcode.z.ai/)
 
-Decompile and disassemble Python bytecode (`.pyc`) from **Python 2.0 through 3.15** back into readable source — written in Rust, three dependencies, no Python required at runtime.
+Decompile and disassemble Python bytecode (`.pyc`) from **Python 2.0 through 3.15** back into readable source — written in Rust, no Python required at runtime, with an optional in-process pass through the [`cure`](https://github.com/ejfkdev/cure) simplifier.
 
 ```sh
 pycdc program.pyc          # decompile to stdout
@@ -20,6 +20,7 @@ pycdc dis program.pyc      # disassemble (exception tables, line numbers, nested
 - **100% semantic equivalence** on a 528-module real-stdlib corpus across 14 interpreters (2.6–3.15); 76.9% are signature-exact
 - **Behavior matrix 663/663 = 100%**: every case passes on 2.6–3.15, including the new 3.15 bytecode encodings
 - Modern syntax: PEP 695/696 type parameters, PEP 750 t-strings, PEP 649 deferred annotations, match/case, walrus, async, f-strings
+- Optional `--cure`: folds the output through the `cure` simplifier/formatter in-process — no external binary, no Python — turning `if cond: return a` / `return b` into `return a if cond else b` and trimming ~10% of the lines
 - Version differences are pure data: one embedded opcode table per release, overridable via `--opcodes`
 - Graceful degradation: unrecognized constructs become comment placeholders — never a crash
 
@@ -78,7 +79,33 @@ pycdc dis ./pyc-corpus -o ./dis-out # -> mirrored .dis files
 # the standalone `pycdas` binary is kept as a compatibility alias
 # with byte-identical output
 pycdas program.pyc
+
+# optional simplification/formatting pass (cure, linked in-process)
+pycdc --cure program.pyc
 ```
+
+`--cure` is opt-in and purely cosmetic: pycdc's output is already
+verified, so the default stays untouched. With it, conditionals collapse
+into ternaries, quotes normalize to single quotes, and formatting is
+reflowed:
+
+```python
+# default                                  # --cure
+def classify(v):                           def classify(v):
+    if v is True:                              return 1 if v is True else 0
+        return 1
+    return 0
+```
+
+If the input cannot be parsed by `cure`, or if it contains
+compiler-introspection metadata (`__annotate__`, `co_freevars`,
+`__conditional_annotations__`, `__classdict__`) where simplifying could
+change runtime behaviour, the file is emitted unchanged and a note goes
+to stderr. The behavior matrix passes 663/663 both with and without
+`--cure`, and all 528 corpus modules still compile under their own
+interpreter with it. Because the pass deliberately rewrites statement
+shapes (if/else → ternary), the corpus's bytecode-signature metric is
+not meaningful for `--cure` output; judge it by the behavior matrix.
 
 `pycdc --help`, `pycdc dis --help` and `pycdas --help` document every
 flag. Exit codes: `0` success, `1` a file failed to process, `2` usage
@@ -157,7 +184,7 @@ and the third-party backlog.
 ## Project layout
 
 ```
-src/    loader → marshal → bytecode → decompiler → codegen  (version.rs/opcode.rs hold the per-version data)
+src/    loader → marshal → bytecode → decompiler → codegen  (version.rs/opcode.rs hold the per-version data; simplify.rs wraps cure)
 configs/ embedded opcode + magic tables (regenerate: tools/gen_configs.py)
 tools/   config generation, corpus building, verification harnesses
 tests/   Rust tests, fixtures, 520-module corpus, 48 behavior cases
@@ -165,7 +192,7 @@ tests/   Rust tests, fixtures, 520-module corpus, 48 behavior cases
 
 ## Acknowledgements
 
-Design informed by [Decompyle++ (pycdc)](https://github.com/zrax/pycdc), [uncompyle6/decompyle3](https://github.com/rocky/python-decompyle3) and [xdis](https://github.com/rocky/python-xdis).
+Design informed by [Decompyle++ (pycdc)](https://github.com/zrax/pycdc), [uncompyle6/decompyle3](https://github.com/rocky/python-decompyle3) and [xdis](https://github.com/rocky/python-xdis). The optional `--cure` post-processing is provided by [cure](https://github.com/ejfkdev/cure).
 
 ## License
 
