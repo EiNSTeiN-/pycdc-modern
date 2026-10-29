@@ -346,3 +346,38 @@ fn expected_async_exit_underflow_preserves_prior_diagnostics() {
         }
     }
 }
+
+#[test]
+fn nested_context_return_matcher_requires_complete_exit_groups_and_slots() {
+    let module = fixture();
+    let none = module.code.consts.iter().position(|o| matches!(&**o, PyObject::None)).unwrap() as u32;
+    for minor in 11..=15 {
+        for groups in [1, 2, 3] {
+            let mut instrs = Vec::new();
+            for _ in 0..groups {
+                instrs.extend([
+                    instruction(Op::SWAP, 3), instruction(Op::SWAP, 2),
+                    instruction(Op::LOAD_CONST, none), instruction(Op::LOAD_CONST, none),
+                    instruction(Op::LOAD_CONST, none), instruction(Op::CALL, 3),
+                    instruction(Op::POP_TOP, 0),
+                ]);
+            }
+            instrs.push(instruction(Op::RETURN_VALUE, 0));
+            for (i, inst) in instrs.iter_mut().enumerate() { inst.offset = i * 2; }
+            let end = instrs.last().unwrap().end();
+            let mut ctx = context(&module.code, PythonVersion { minor, ..module.version() }, instrs);
+            ctx.with_exits = groups;
+            assert_eq!(ctx.with_return_tail_info(0), Some((end, groups)));
+            if groups > 1 {
+                ctx.with_exits = groups - 1;
+                assert!(ctx.with_return_tail_info(0).is_none(), "must not consume unknown exits");
+                ctx.with_exits = groups;
+                ctx.instrs[8].arg = 1;
+                assert!(ctx.with_return_tail_info(0).is_none(), "second SWAP pair must be exact");
+                ctx.instrs[8].arg = 2;
+                ctx.instrs[13].op = Op::NOP;
+                assert!(ctx.with_return_tail_info(0).is_none(), "each exit must discard its call result");
+            }
+        }
+    }
+}

@@ -271,6 +271,23 @@ fn sunk_early_context_exits_leave_the_normal_exit_available() {
 }
 
 #[test]
+fn nested_contexts_carry_one_return_through_every_exit() {
+    for version in ["3.11", "3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("nested_context_returns.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "with contexts[0]:\n        with contexts[1]:\n            return value()",
+            "with contexts[0]:\n        with contexts[1]:\n            with contexts[2]:\n                return {'rows': value()}",
+            "async with contexts[0]:\n        async with contexts[1]:\n            return value()",
+            "async with contexts[0]:\n        async with contexts[1]:\n            async with contexts[2]:\n                return await value()",
+            "async with contexts[0]:\n        async with contexts[1]:\n            return (value(),)",
+            "async with contexts[0]:\n        return await value()",
+            "result = value()\n        return result",
+        ], version);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

@@ -41920,6 +41920,10 @@ if split_cond {
     }
 
     fn with_return_tail_end(&self, k0: usize) -> Option<usize> {
+        self.with_return_tail_info(k0).map(|(after, _)| after)
+    }
+
+    fn with_return_tail_info(&self, k0: usize) -> Option<(usize, usize)> {
         let first = self.instrs.get(k0)?;
         if !(first.op == Op::ROT_TWO
             || (first.op == Op::SWAP && (first.arg == 2 || first.arg == 3)))
@@ -41946,6 +41950,8 @@ if split_cond {
         let mut call = false;
         let mut pop_after_call = false;
         let mut cleanup = false;
+        let mut remaining_exits = self.with_exits.saturating_sub(1);
+        let mut exit_groups = 1;
         while k < self.instrs.len() {
             let x = &self.instrs[k];
             match x.op {
@@ -41998,9 +42004,27 @@ if split_cond {
                     pop_after_call = true;
                     k += 1;
                 }
+                // Nested modern contexts carry the same computed value
+                // across another complete exit group before one shared
+                // return. Only consume the exact SWAP pair after a finished
+                // exit, and never exceed the known context-exit slots.
+                Op::SWAP if (x.arg == 2 || x.arg == 3) && call && pop_after_call
+                    && self.version.at_least(3, 11)
+                    && remaining_exits > 0
+                    && (x.arg == 2 || matches!(self.instrs.get(k + 1).map(|next| (next.op, next.arg)),
+                        Some((Op::SWAP, 2)))) =>
+                {
+                    remaining_exits -= 1;
+                    exit_groups += 1;
+                    nones = 0;
+                    call = false;
+                    pop_after_call = false;
+                    cleanup = false;
+                    k += if x.arg == 3 { 2 } else { 1 };
+                }
                 Op::RETURN_VALUE | Op::RETURN_CONST => {
                     if cleanup || (call && pop_after_call) {
-                        return Some(x.end());
+                        return Some((x.end(), exit_groups));
                     }
                     return None;
                 }
@@ -42100,7 +42124,7 @@ if split_cond {
         let Some(&ki) = self.idx_of.get(&inst.offset) else {
             return false;
         };
-        let Some(after) = self.with_return_tail_end(ki) else {
+        let Some((after, exit_groups)) = self.with_return_tail_info(ki) else {
             return false;
         };
         // 3.14 guard-arm sunk exits: the With is still OPEN (its merged
@@ -42138,6 +42162,32 @@ if split_cond {
             }
             let skip_end = self.with_handler_skip_end(after);
             if self.skip_until.map_or(true, |s| s < skip_end) {
+                self.skip_until = Some(skip_end);
+            }
+            return true;
+        }
+        // The innermost context may have closed at the first exit group,
+        // leaving its With statement last in a still-open outer context.
+        // A proved multi-exit return belongs in that closed inner body.
+        // Contiguous outer contexts prove its nesting. Keep them open:
+        // their exit slots are still needed on the suppression path.
+        if exit_groups > 1
+            && self.blocks.iter().rev().take(exit_groups - 1)
+                .all(|block| block.kind == BlockType::With)
+            && self.blocks.len() >= exit_groups
+            && matches!(self.blocks.last().and_then(|block| block.stmts.last()), Some(Stmt::With { .. }))
+        {
+            let value = self.pop_expr();
+            let ret = match &*value {
+                Expr::Const(object) if matches!(&**object, PyObject::None) => Stmt::Return(None),
+                _ => Stmt::Return(Some(value)),
+            };
+            if let Some(Stmt::With { body, .. }) = self.blocks.last_mut().and_then(|block| block.stmts.last_mut()) {
+                body.push(ret);
+            }
+            self.with_exits = self.with_exits.saturating_sub(1);
+            let skip_end = self.with_handler_skip_end(after);
+            if self.skip_until.map_or(true, |current| current < skip_end) {
                 self.skip_until = Some(skip_end);
             }
             return true;
