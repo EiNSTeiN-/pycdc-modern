@@ -47507,6 +47507,7 @@ impl<'a> Ctx<'a> {
     /// method is already `Attribute { value: receiver }`, so the marker is
     /// only validated, not consumed into the AST.
     fn call_311(&mut self, argc: usize, _is_method: bool) {
+        let clean_before_call = self.clean;
         // 3.11+ assert-with-message: the assertion class and the message
         // sit as [cls, msg] with NO null slot, and CALL 0 consumes msg as
         // the self_or_null position (an implicit first argument). Without
@@ -47548,6 +47549,7 @@ impl<'a> Ctx<'a> {
         //   the iterable sits ABOVE the function and becomes the marker
         // Peek before popping to choose the right order.
         let n = self.stack.len();
+        let missing_callable_slot = n == 0;
         let genexpr_case = n >= 2
             && matches!(&self.stack[n - 1], Sv::E(_))
             && matches!(&self.stack[n - 2], Sv::E(f) if is_comp_callable(f));
@@ -47748,10 +47750,34 @@ impl<'a> Ctx<'a> {
             && none_args
             && (func_is_none || func_is_underflow)
         {
-            let early_exit = self.blocks.iter().any(|block| {
+            let protected_early_exit = self.blocks.iter().any(|block| {
                 block.kind == BlockType::With && block.end > self.cur_offset
             }) && matches!(self.blocks.last().map(|block| block.kind),
                           Some(BlockType::If) | Some(BlockType::Else));
+            // CPython 3.14+ can sink a constant-return protocol call
+            // immediately past the With's final protected fragment. The
+            // arm still owns it, and a later normal exit needs this slot.
+            let sunk_return_exit = self.version.at_least(3, 14)
+                && pos_args.len() == 3
+                && self.blocks.iter().any(|block| block.kind == BlockType::With)
+                && self.blocks.last().filter(|block| {
+                    matches!(block.kind, BlockType::If | BlockType::Else)
+                        && block.end > self.cur_offset
+                }).zip(self.idx_of.get(&self.cur_offset)).map_or(false, |(arm, &index)| {
+                    for item in self.instrs[index + 1..].iter().take_while(|item| item.offset < arm.end) {
+                        if item.op == Op::RETURN_VALUE { return true; }
+                        // 3.15 adds a null SEND slot after GET_AWAITABLE.
+                        if item.op == Op::PUSH_NULL && self.version.at_least(3, 15) { continue; }
+                        if !matches!(item.op,
+                            Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::GET_AWAITABLE
+                            | Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::LOAD_COMMON_CONSTANT
+                            | Op::SEND | Op::YIELD_VALUE
+                            | Op::RESUME | Op::JUMP_BACKWARD_NO_INTERRUPT | Op::END_SEND | Op::POP_TOP)
+                        { return false; }
+                    }
+                    false
+                });
+            let early_exit = protected_early_exit || sunk_return_exit;
             if !early_exit {
                 self.with_exits -= 1;
             }
@@ -47769,6 +47795,14 @@ impl<'a> Ctx<'a> {
                 });
             if next_awaitable {
                 self.with_exit_await_drop = true;
+                // The exit callable is deliberately absent from this
+                // modeled stack. Its exact three-None async protocol
+                // has been consumed, so that one expected underflow
+                // does not indicate missing user code. Preserve every
+                // incomplete diagnostic that preceded this call.
+                if missing_callable_slot && argc == 3 {
+                    self.clean = clean_before_call;
+                }
             }
             return;
         }

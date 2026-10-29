@@ -254,6 +254,23 @@ fn handler_loops_keep_computed_returns_inside_their_context() {
 }
 
 #[test]
+fn sunk_early_context_exits_leave_the_normal_exit_available() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("sunk_context_exits.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "if pending:\n            return False\n    record('outside')",
+            "if pending:\n            return\n    record('outside')",
+            "if pending:\n            return False\n        if release:\n            return False\n    record('outside')",
+            "if pending:\n            return release\n    record('outside')",
+            "await user_call(None, None, None)\n    record('outside')",
+            "record('ready')\n    record('outside')",
+        ], version);
+        assert!(!src.contains("await None("), "Python {version}: leaked exit call:\n{src}");
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

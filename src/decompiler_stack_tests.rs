@@ -314,3 +314,35 @@ fn bounded_generator_construction_rejects_invalid_closure_slots() {
     let ctx = context(&parent, module.version(), vec![instruction(Op::GET_ITER, 0)]);
     assert!(ctx.sim_stack_region(0, 1, vec![]).is_none());
 }
+
+#[test]
+fn expected_async_exit_underflow_preserves_prior_diagnostics() {
+    let module = fixture();
+    for minor in [14, 15] {
+        for initial_clean in [true, false] {
+            let mut next = instruction(Op::GET_AWAITABLE, 2);
+            next.offset = 2;
+            let mut ctx = context(&module.code, PythonVersion { minor, ..module.version() },
+                vec![instruction(Op::CALL, 3), next]);
+            ctx.idx_of.insert(0, 0);
+            ctx.with_exits = 1;
+            ctx.clean = initial_clean;
+            ctx.stack = vec![Sv::E(Rc::new(Expr::Const(Rc::new(PyObject::None)))); 3];
+            ctx.call_311(3, false);
+            assert!(ctx.with_exit_await_drop);
+            assert_eq!(ctx.clean, initial_clean, "prior diagnostics must survive");
+            assert_eq!(ctx.with_exits, 0);
+        }
+        for (argc, awaited) in [(2, true), (3, false)] {
+            let mut next = instruction(if awaited { Op::GET_AWAITABLE } else { Op::POP_TOP }, 2);
+            next.offset = 2;
+            let mut ctx = context(&module.code, PythonVersion { minor, ..module.version() },
+                vec![instruction(Op::CALL, argc as u32), next]);
+            ctx.idx_of.insert(0, 0);
+            ctx.with_exits = 1;
+            ctx.stack = vec![Sv::E(Rc::new(Expr::Const(Rc::new(PyObject::None)))); argc];
+            ctx.call_311(argc, false);
+            assert!(!ctx.clean, "only the exact three-None async exit forgives its absent callable");
+        }
+    }
+}
