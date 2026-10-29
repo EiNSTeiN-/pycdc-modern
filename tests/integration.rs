@@ -153,6 +153,22 @@ fn generator_statement_route_keeps_python312_multiline_filter_layout() {
 }
 
 #[test]
+fn filtered_generators_keep_boolean_values_separate_from_rejection_guards() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(
+            &format!("filtered_generator_boolean_values.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "row[1] or 0 for row in rows if row[0]",
+            "row[1] and row[2] for row in rows if row[0]",
+            "row[1] or row[2] or 0 for row in rows if row[0]",
+            "row[1] and row[2] or 0 for row in rows if row[0]",
+            "row.get('amount') or 0.0 for row in rows if row.get('amount') is not None",
+        ], version);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

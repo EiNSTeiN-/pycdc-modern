@@ -43172,7 +43172,12 @@ impl<'a> Ctx<'a> {
                 && self
                     .idx_of
                     .get(&self.cur_offset)
-                    .and_then(|&pi| (pi > 0).then(|| &self.instrs[pi - 1]))
+                    // 3.14 inserts NOT_TAKEN after the conditional jump.
+                    // It does not consume the retained operand: the first
+                    // meaningful instruction in the arm is still its pop.
+                    .and_then(|&pi| self.instrs[..pi].iter().rev().find(|p| {
+                        !matches!(p.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    }))
                     .map_or(false, |p| {
                         matches!(p.op, Op::POP_JUMP_IF_FALSE | Op::POP_JUMP_IF_TRUE)
                             && !p.is_backward
@@ -51730,6 +51735,14 @@ fn generator_parts_from_body(
                 result = generator_parts_from_body(body, generators);
                 if result.is_none() { return None; }
             }
+            // A rejected iteration can be an inverted continue guard,
+            // followed by the yielded value. Keep the statement parser's
+            // expression instead of losing its COPY/TO_BOOL value merges.
+            Stmt::If { cond, body, orelse }
+                if orelse.is_empty() && matches!(body.as_slice(), [Stmt::Continue]) => {
+                if result.is_some() { return None; }
+                generators.last_mut()?.ifs.push(negate_cond(cond.clone()));
+            }
             Stmt::If { cond, body, orelse } if orelse.is_empty() => {
                 if result.is_some() { return None; }
                 generators.last_mut()?.ifs.push(cond.clone());
@@ -54100,6 +54113,33 @@ mod generator_parts_tests {
             )))))],
             orelse: vec![],
             is_async: false,
+        }
+    }
+
+    #[test]
+    fn extraction_accepts_only_an_early_continue_guard() {
+        let guard = Stmt::If {
+            cond: Rc::new(Expr::Name("skip".into())),
+            body: vec![Stmt::Continue], orelse: vec![],
+        };
+        let mut accepted = yielded_loop();
+        if let Stmt::For { body, .. } = &mut accepted { body.insert(0, guard.clone()); }
+        let mut clauses = Vec::new();
+        assert!(generator_parts_from_body(&[accepted], &mut clauses).is_some());
+        assert_eq!(clauses[0].ifs.len(), 1);
+        assert!(matches!(&*clauses[0].ifs[0], Expr::Unary { op: UnaryOp::Not, .. }));
+        assert!(generator_parts_from_body(&[guard.clone()], &mut Vec::new()).is_none());
+        let mut late = yielded_loop();
+        if let Stmt::For { body, .. } = &mut late { body.push(guard.clone()); }
+        assert!(generator_parts_from_body(&[late], &mut Vec::new()).is_none());
+        for add_else in [false, true] {
+            let mut rejected = guard.clone();
+            if let Stmt::If { body, orelse, .. } = &mut rejected {
+                if add_else { orelse.push(Stmt::Pass); } else { body.push(Stmt::Pass); }
+            }
+            let mut enclosing = yielded_loop();
+            if let Stmt::For { body, .. } = &mut enclosing { body.insert(0, rejected); }
+            assert!(generator_parts_from_body(&[enclosing], &mut Vec::new()).is_none());
         }
     }
 
