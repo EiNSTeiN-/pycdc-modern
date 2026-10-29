@@ -29795,6 +29795,13 @@ return None;
                     };
                     st.push(Rc::new(e));
                 }
+                Op::BUILD_MAP => {
+                    let count = arg.checked_mul(2)?;
+                    if st.len() < count { return None; }
+                    let values = st.split_off(st.len() - count);
+                    st.push(Rc::new(Expr::Dict(values.chunks_exact(2)
+                        .map(|pair| (pair[0].clone(), pair[1].clone())).collect())));
+                }
                 Op::RETURN_CONST => {
                     st.push(Rc::new(Expr::Const(
                         self.code.consts.get(arg).cloned().unwrap_or_else(|| Rc::new(PyObject::None)),
@@ -30477,21 +30484,15 @@ return None;
         Some(body_start)
     }
 
-    /// Recover a shared rejection block reached by a None-led OR guard.
+    /// Recover a shared rejection block reached by short-circuit tests.
     /// CPython 3.14 puts the last test's success jump over the reject block.
     /// Treating earlier None jumps as nested positive ifs loses rejection for
     /// missing values. A negated comparison chain also has a POP_TOP cleanup
     /// edge; retain its copied middle value to avoid evaluating it twice.
-    fn try_none_rejection_guard(
+    fn try_shared_rejection_guard(
         &self, first: &ExprRef, first_jump_true: bool, target: usize,
     ) -> Option<(ExprRef, Vec<Stmt>, usize)> {
         if !self.version.at_least(3, 14) || !self.stack.is_empty() || target <= self.cur_offset {
-            return None;
-        }
-        if !matches!(&**first, Expr::Compare { operands, ops }
-            if operands.len() == 2 && ops.len() == 1
-                && matches!(ops[0], CmpOp::Is | CmpOp::IsNot)
-                && matches!(&*operands[1], Expr::Const(value) if matches!(&**value, PyObject::None))) {
             return None;
         }
         let padding = |op| matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE | Op::EXTENDED_ARG);
@@ -30518,14 +30519,37 @@ return None;
             if !self.blocks.iter().any(|block| matches!(block.kind, BlockType::For | BlockType::While)
                 && (block.start == top || block.cond_end == top)) { return None; }
             (vec![Stmt::Continue], reject_index + 1)
-        } else if let Some(value) = constant_at(reject_index) {
-            let ret = skip_padding(reject_index + 1);
+        } else {
+            // Accept only a straight value expression that leaves exactly
+            // one result before RETURN, without branches or statements.
+            let mut ret = reject_index;
+            while let Some(item) = self.instrs.get(ret) {
+                if item.op == Op::RETURN_VALUE { break; }
+                if item.is_jump() || matches!(item.op, Op::STORE_FAST | Op::STORE_NAME
+                    | Op::STORE_DEREF | Op::STORE_ATTR | Op::STORE_SUBSCR | Op::POP_EXCEPT
+                    | Op::PUSH_EXC_INFO | Op::RERAISE | Op::RAISE_VARARGS) { return None; }
+                ret += 1;
+            }
             if self.instrs.get(ret)?.op != Op::RETURN_VALUE { return None; }
-            (vec![Stmt::Return(Some(Rc::new(Expr::Const(value))))], ret + 1)
-        } else { return None; };
+            let mut result = self.sim_stack_region(reject_index, ret, Vec::new())?;
+            if result.len() != 1 { return None; }
+            (vec![Stmt::Return(Some(result.pop()?))], ret + 1)
+        };
         let equivalent_return = |index: usize| -> Option<usize> {
             let Some(Stmt::Return(Some(expected))) = body.first() else { return None; };
-            let Expr::Const(expected) = &**expected else { return None; };
+            let Expr::Const(expected) = &**expected else {
+                // Short constructed returns can be duplicated too. Compare
+                // the complete branch-free instruction run, not just its
+                // first constant or the resulting expression's spelling.
+                let mut actual = skip_padding(index);
+                for expected in &self.instrs[reject_index..end_index] {
+                    if padding(expected.op) { continue; }
+                    let item = self.instrs.get(actual)?;
+                    if item.op != expected.op || item.arg != expected.arg { return None; }
+                    actual = skip_padding(actual + 1);
+                }
+                return Some(actual);
+            };
             let actual = constant_at(index)?;
             if !Rc::ptr_eq(expected, &actual) && !const_value_eq(expected, &actual) { return None; }
             let ret = skip_padding(index + 1);
@@ -30628,7 +30652,7 @@ return None;
     fn handle_cond_jump(&mut self, cond: ExprRef, jump_if_true: bool, target: usize) {
         // tail-duplicated body copy: aim the jump at the original body
         let target = self.dup_copy_redirect.get(&target).copied().unwrap_or(target);
-        if let Some((guard, body, resume)) = self.try_none_rejection_guard(&cond, jump_if_true, target) {
+        if let Some((guard, body, resume)) = self.try_shared_rejection_guard(&cond, jump_if_true, target) {
             self.push_stmt(Stmt::If { cond: guard, body, orelse: Vec::new() });
             self.skip_until = Some(resume);
             return;

@@ -1244,3 +1244,22 @@ fn none_rejection_guards_preserve_chains_calls_and_success_returns() {
         assert_eq!(src.matches("            continue").count(), 2, "{version}: {src}");
     }
 }
+
+#[test]
+fn constructed_rejections_keep_selected_values_and_statement_boundaries() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("constructed_rejection_guards.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "if value is None or not 0.0 <= value <= 20.0:\n        return build('reject', amount=0)",
+            "if not value or len(value) < 2:\n        return build('reject', amount=0)",
+            "if invalid(value) or value < 2:",
+            "if not value or len(value) < 2:\n        return False\n    return True",
+            "if value is None or not 0.0 <= value <= 20.0:\n        return ['reject', value]",
+            "if value is None or not 0.0 <= value <= 20.0:\n        return {'kind': 'reject', 'value': value}",
+            "return collect((scale * item for item in rows))",
+            "result = build('reject', amount=0)\n        return result",
+            "log('rejected')\n        return build('reject', amount=0)",
+        ], version);
+    }
+}

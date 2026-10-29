@@ -509,3 +509,29 @@ fn following_exception_clauses_require_bounded_typed_mismatch_protocols() {
     let ctx = build(vec![instruction(Op::NOP, 0); 32], Op::POP_JUMP_IF_FALSE, true);
     assert!(ctx.following_except_clause_end(0).is_none());
 }
+
+#[test]
+fn bounded_mapping_preserves_pair_order_prefix_and_rejects_underflow() {
+    let module = fixture();
+    let values: Vec<_> = ["prefix", "key0", "value0", "key1", "value1"].iter()
+        .map(|name| Rc::new(Expr::Name((*name).into()))).collect();
+    for minor in 8..=15 {
+        let version = PythonVersion { minor, ..module.version() };
+        let ctx = context(&module.code, version, vec![instruction(Op::BUILD_MAP, 2)]);
+        let result = ctx.sim_stack_region(0, 1, values.clone()).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(Rc::ptr_eq(&result[0], &values[0]));
+        let Expr::Dict(pairs) = &*result[1] else { panic!("expected dictionary"); };
+        assert_eq!(pairs.len(), 2);
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            assert!(Rc::ptr_eq(key, &values[1 + 2 * i]));
+            assert!(Rc::ptr_eq(value, &values[2 + 2 * i]));
+        }
+        assert!(ctx.sim_stack_region(0, 1, values[..3].to_vec()).is_none());
+        let empty = context(&module.code, version, vec![instruction(Op::BUILD_MAP, 0)]);
+        let result = empty.sim_stack_region(0, 1, values[..1].to_vec()).unwrap();
+        assert!(matches!(&*result[1], Expr::Dict(pairs) if pairs.is_empty()));
+        let oversized = context(&module.code, version, vec![instruction(Op::BUILD_MAP, u32::MAX)]);
+        assert!(oversized.sim_stack_region(0, 1, values.clone()).is_none());
+    }
+}
