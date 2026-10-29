@@ -42142,6 +42142,17 @@ if split_cond {
             }
             return true;
         }
+        // A loop's out-of-line except fragments can extend the With's
+        // region beyond its normal computed-return tail. The With is then
+        // still open here although its loop has closed. This pure exit
+        // protocol carries the body's existing result, not a user call.
+        // Close that With at the tail before simulating its cleanup slots.
+        if self.blocks.last().map_or(false, |block| {
+            block.kind == BlockType::With && block.end > inst.offset
+        }) {
+            self.fold_with_return(inst.offset, after);
+            return true;
+        }
         // probe the target shape BEFORE popping so a failed fold leaves
         // the stack untouched
         if !matches!(

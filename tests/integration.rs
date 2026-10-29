@@ -236,6 +236,24 @@ fn context_managers_keep_return_values_inside_the_body() {
 }
 
 #[test]
+fn handler_loops_keep_computed_returns_inside_their_context() {
+    for version in ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("loop_context_returns.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        for prefix in ["", "async "] {
+            for (suffix, value) in [("value", "result"), ("length", "len(result)"),
+                                    ("mapping", "{'rows': result}")] {
+                let name = if prefix.is_empty() { "sync" } else { "async" };
+                // 3.10 optimizes this final continue into the loop's fallthrough.
+                let handler = if version == "3.10" && suffix == "value" { "pass" } else { "continue" };
+                let expected = format!("{prefix}def {name}_{suffix}(lock, rows, parse):\n    {prefix}with lock:\n        result = []\n        for row in rows:\n            try:\n                result.append(parse(row))\n            except ValueError:\n                {handler}\n        return {value}");
+                assert!(src.contains(&expected), "Python {version}: {expected} missing:\n{src}");
+            }
+        }
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
