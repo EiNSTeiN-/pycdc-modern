@@ -366,6 +366,24 @@ fn private_handler_bodies_do_not_hide_later_typed_clauses() {
 }
 
 #[test]
+fn handler_iterator_disposal_preserves_break_and_post_loop_work() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("handler_iterator_breaks.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "except (OSError, asyncio.TimeoutError) as error:\n            await owner.log('transient', str(error))\n            break",
+            "except Exception as error:\n            await owner.log('unavailable', str(error))\n            break",
+            "except (OSError, asyncio.TimeoutError) as error:\n            owner.log('transient', str(error))\n            break",
+            "except (OSError, asyncio.TimeoutError):\n            await owner.log('transient', 'owned fault')\n            break",
+            "except Exception:\n            await owner.log('unavailable', 'owned fault')\n            break",
+            "    await owner.log('finished', accepted)\n    return accepted",
+            "    owner.log('finished', accepted)\n    return accepted",
+        ], version);
+        assert_eq!(src.matches("\n            break").count(), 10, "Python {version}: {src}");
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
