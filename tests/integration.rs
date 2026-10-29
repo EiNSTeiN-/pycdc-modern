@@ -1263,3 +1263,20 @@ fn constructed_rejections_keep_selected_values_and_statement_boundaries() {
         ], version);
     }
 }
+
+#[test]
+fn shared_validation_raises_keep_causes_and_formatted_error_paths() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("shared_validation_raises.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "if value is None or bad(value) or not ready(value):",
+            "if value is None or not 0 <= read(value) <= 10 or invalid(value):",
+            "raise make_error('invalid', value=value) from make_cause(value)",
+            "raise make_error('invalid', value=value) from None",
+            "raise make_error(f'{label!r}: {value!s:>{width}}') from make_cause()",
+            "raise make_error(f'{label!a}: {value:{width}}') from make_cause()",
+            "if value is None or reject(value):\n        raise ValueError",
+        ], version);
+    }
+}

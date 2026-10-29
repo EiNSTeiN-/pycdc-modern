@@ -535,3 +535,99 @@ fn bounded_mapping_preserves_pair_order_prefix_and_rejects_underflow() {
         assert!(oversized.sim_stack_region(0, 1, values.clone()).is_none());
     }
 }
+
+#[test]
+fn bounded_formatting_preserves_conversions_and_dynamic_specs() {
+    for minor in 13..=15 {
+        let path = format!("{}/tests/pyc/bounded_formatting.3.{minor}.pyc", env!("CARGO_MANIFEST_DIR"));
+        let module = PycModule::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let version = module.version();
+        for (name, expected) in [
+            ("simple", "return f'{value}'"),
+            ("conversions", "return f'{label!r}: {value!s:>{width}}'"),
+            ("ascii_spec", "return f'{label!a}: {value:{width}}'"),
+        ] {
+            let code = nested_code(&module.code, name);
+            let instrs = crate::bytecode::decode_instructions(&code, table_for(version).unwrap(), version);
+            let start = instrs.iter().position(|ins| ins.op == Op::RESUME).unwrap() + 1;
+            let end = instrs.iter().position(|ins| ins.op == Op::RETURN_VALUE).unwrap();
+            let ctx = context(&code, version, instrs);
+            let prefix = Rc::new(Expr::Name("prefix".into()));
+            let result = ctx.sim_stack_region(start, end, vec![prefix.clone()]).unwrap();
+            assert_eq!(result.len(), 2, "3.{minor}: {name}");
+            assert!(Rc::ptr_eq(&result[0], &prefix));
+            let source = crate::codegen::generate(&[Stmt::Return(Some(result[1].clone()))], version, true);
+            assert_eq!(source.trim(), expected, "3.{minor}: {name}");
+        }
+    }
+}
+
+#[test]
+fn bounded_formatting_rejects_invalid_conversion_parts_and_missing_operands() {
+    let module = fixture();
+    let value = Rc::new(Expr::Name("value".into()));
+    for minor in 13..=15 {
+        let version = PythonVersion { minor, ..module.version() };
+        for (op, arg, stack) in [
+            (Op::CONVERT_VALUE, 1, vec![]),
+            (Op::CONVERT_VALUE, 0, vec![value.clone()]),
+            (Op::CONVERT_VALUE, 4, vec![value.clone()]),
+            (Op::FORMAT_SIMPLE, 0, vec![]),
+            (Op::FORMAT_WITH_SPEC, 0, vec![]),
+            (Op::FORMAT_WITH_SPEC, 0, vec![value.clone()]),
+            (Op::BUILD_STRING, 2, vec![value.clone()]),
+            (Op::BUILD_STRING, 1, vec![value.clone()]),
+            (Op::BUILD_STRING, 1, vec![Rc::new(Expr::Const(Rc::new(PyObject::Int(3))))]),
+        ] {
+            let ctx = context(&module.code, version, vec![instruction(op, arg)]);
+            assert!(ctx.sim_stack_region(0, 1, stack).is_none(), "3.{minor}: {op:?} {arg}");
+        }
+        for (arg, conversion) in [(1, 's'), (2, 'r'), (3, 'a')] {
+            let ctx = context(&module.code, version, vec![instruction(Op::CONVERT_VALUE, arg), instruction(Op::FORMAT_SIMPLE, 0)]);
+            let result = ctx.sim_stack_region(0, 2, vec![value.clone()]).unwrap();
+            assert_eq!(result.len(), 1);
+            let Expr::FString(text) = &*result[0] else { panic!("expected f-string"); };
+            assert!(matches!(&text.parts[..], [FStringPart::Value { conversion: Some(c), format_spec: None, .. }] if *c == conversion));
+        }
+    }
+}
+
+#[test]
+fn shared_raise_regions_require_exact_operands_and_no_statements() {
+    for minor in [14, 15] {
+        let path = format!("{}/tests/pyc/shared_validation_raises.3.{minor}.pyc", env!("CARGO_MANIFEST_DIR"));
+        let module = PycModule::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let version = module.version();
+        for name in ["plain", "cause", "suppress"] {
+            let code = nested_code(&module.code, name);
+            let instrs = crate::bytecode::decode_instructions(&code, table_for(version).unwrap(), version);
+            let first = instrs.iter().position(|item| item.op == Op::POP_JUMP_IF_NONE).unwrap();
+            let target = instrs[first].target.unwrap();
+            let terminal = instrs.iter().position(|item| item.op == Op::RAISE_VARARGS).unwrap();
+            let mut ctx = context(&code, version, instrs);
+            ctx.idx_of = ctx.instrs.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
+            ctx.cur_offset = ctx.instrs[first].offset;
+            let cond = Rc::new(Expr::Compare {
+                operands: vec![Rc::new(Expr::Name("value".into())), Rc::new(Expr::Const(Rc::new(PyObject::None)))],
+                ops: vec![CmpOp::Is],
+            });
+            let (_, body, _) = ctx.try_shared_rejection_guard(&cond, true, target).unwrap();
+            assert!(matches!(&body[..], [Stmt::Raise { exc: Some(_), cause, .. }] if cause.is_some() == (name != "plain")));
+            let original = ctx.instrs[terminal].arg;
+            for arg in [0, 3, if original == 1 { 2 } else { 1 }] {
+                ctx.instrs[terminal].arg = arg;
+                assert!(ctx.try_shared_rejection_guard(&cond, true, target).is_none(), "3.{minor}: {name}, arg {arg}");
+            }
+            ctx.instrs[terminal].arg = original;
+            let start = ctx.idx_of[&target];
+            let original = ctx.instrs[start].op;
+            for op in [Op::STORE_FAST, Op::POP_EXCEPT, Op::PUSH_EXC_INFO, Op::RERAISE] {
+                ctx.instrs[start].op = op;
+                assert!(ctx.try_shared_rejection_guard(&cond, true, target).is_none(), "3.{minor}: {name}, {op:?}");
+            }
+            ctx.instrs[start].op = original;
+            ctx.stack.push(Sv::E(cond.clone()));
+            assert!(ctx.try_shared_rejection_guard(&cond, true, target).is_none());
+        }
+    }
+}
