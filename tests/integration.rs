@@ -114,6 +114,22 @@ fn bounded_try_return_keeps_its_handler_and_following_sibling() {
 }
 
 #[test]
+fn chained_comparison_ternaries_keep_collection_values_and_filters_distinct() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(
+            &format!("comprehension_chained_ternaries.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "return {value: 1 if 6 <= value <= 8 else 0 for value in values}",
+            "return {value if 6 <= value <= 8 else -value: value for value in values}",
+            "return [0.6 + 0.4 * (1.0 if 4 <= value <= 8 < 10 else 0.3) for value in values]",
+            "return [1 if value >= 6 else 0 for value in values if value <= 8]",
+            "base(value) + coefficient(value) * (1.0 if lower() <= probe(value) <= upper() else 0.3)",
+        ], version);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

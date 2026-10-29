@@ -31595,6 +31595,51 @@ return None;
             if let Some((merged, body_start, body_end)) =
                 self.try_stmt_chain_compare(&cond, target)
             {
+                // A chain can guard a comprehension element's ternary.
+                // Its success/else arms build values; opening a statement
+                // If here drops those values and the collection itself.
+                let ternary_merge = (|| {
+                    let comp = self.inline_comp.as_ref()?;
+                    let start = *self.idx_of.get(&body_start)?;
+                    let end = *self.idx_of.get(&body_end)?;
+                    let then = self.instrs[start..end].iter()
+                        .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                        .collect::<Vec<_>>();
+                    let hop = then.last()?;
+                    let merge = hop.target?;
+                    if hop.op != Op::JUMP_FORWARD || hop.is_backward
+                        || merge <= body_end || merge >= comp.end
+                        || !then[..then.len() - 1].iter().all(|item| is_pure_value_op(item.op))
+                    { return None; }
+                    let merge_index = *self.idx_of.get(&merge)?;
+                    if !self.instrs[end..merge_index].iter().all(|item| {
+                        is_pure_value_op(item.op) || matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                    }) { return None; }
+                    let cleanup = *self.idx_of.get(&target)?;
+                    let mut failed = self.instrs[cleanup..start].iter()
+                        .filter(|item| !matches!(item.op, Op::NOP | Op::NOT_TAKEN | Op::CACHE));
+                    if failed.next()?.op != Op::POP_TOP { return None; }
+                    let failed_hop = failed.next()?;
+                    if failed_hop.op != Op::JUMP_FORWARD || failed_hop.target != Some(body_end)
+                        || failed.next().is_some()
+                    { return None; }
+                    let Expr::Compare { operands, .. } = &*cond else { return None; };
+                    if !matches!(self.stack.last(), Some(Sv::E(value))
+                        if Rc::ptr_eq(value, &operands[1]))
+                    { return None; }
+                    Some(merge)
+                })();
+                if let Some(merge) = ternary_merge {
+                    // COPY retained this one middle operand for later links.
+                    // The chain scan consumed those links without executing
+                    // their stack operations; remove only that same value.
+                    self.stack.pop();
+                    let comp = self.inline_comp.as_mut().unwrap();
+                    comp.pending_merges.push((merge, merged, None));
+                    comp.tern_chain_t = None;
+                    self.skip_until = Some(body_start);
+                    return;
+                }
                 let mut blk = Block::new(BlockType::If, body_start, body_end);
                 blk.cond = Some(merged);
                 blk.cond_set = true;
