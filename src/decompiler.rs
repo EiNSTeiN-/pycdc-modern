@@ -44392,6 +44392,19 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    fn loads_none(&self, op: Op, arg: u32) -> bool {
+        match op {
+            Op::LOAD_CONST => matches!(
+                self.code.consts.get(arg as usize).map(|o| &**o),
+                Some(PyObject::None)
+            ),
+            Op::LOAD_COMMON_CONSTANT => common_constant_expr(arg, self.version)
+                .map_or(false, |value| matches!(&*value,
+                    Expr::Const(object) if matches!(&**object, PyObject::None))),
+            _ => false,
+        }
+    }
+
     /// 3.11+ function-tail try/except[/else] whose implicit `return None`
     /// the compiler SANK into both exits: the success path ends with a
     /// RETURN None right before the out-of-line chain, and the chain's
@@ -44491,15 +44504,15 @@ impl<'a> Ctx<'a> {
         // the mainline and claimed the else arm's own return as the
         // mirror, losing it. A bare `LOAD None; RETURN` tail is
         // try_tail_sunk_pair's stricter domain - skip it here.
-        if tail.len() < 2 {
+        let meaningful_tail: Vec<_> = tail.iter().filter(|(op, _)| {
+            !matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+        }).collect();
+        if meaningful_tail.len() < 2 {
             return None;
         }
-        if tail.len() == 2
-            && tail[0].0 == Op::LOAD_CONST
-            && matches!(
-                self.code.consts.get(tail[0].1 as usize).map(|o| &**o),
-                Some(PyObject::None)
-            )
+        if meaningful_tail.len() == 2
+            && meaningful_tail[1].0 == Op::RETURN_VALUE
+            && self.loads_none(meaningful_tail[0].0, meaningful_tail[0].1)
         {
             return None;
         }
@@ -44616,11 +44629,7 @@ impl<'a> Ctx<'a> {
             ),
             Op::RETURN_VALUE => ri > 0 && {
                 let p = &self.instrs[ri - 1];
-                p.op == Op::LOAD_CONST
-                    && matches!(
-                        self.code.consts.get(p.arg as usize).map(|o| &**o),
-                        Some(PyObject::None)
-                    )
+                self.loads_none(p.op, p.arg)
             },
             _ => false,
         };
@@ -44642,13 +44651,7 @@ impl<'a> Ctx<'a> {
                     self.idx_of
                         .get(&x.offset)
                         .and_then(|&xi| xi.checked_sub(1).map(|p| &self.instrs[p]))
-                        .map(|p| {
-                            p.op == Op::LOAD_CONST
-                                && matches!(
-                                    self.code.consts.get(p.arg as usize).map(|o| &**o),
-                                    Some(PyObject::None)
-                                )
-                        })
+                        .map(|p| self.loads_none(p.op, p.arg))
                         .unwrap_or(false)
                 },
                 _ => false,
