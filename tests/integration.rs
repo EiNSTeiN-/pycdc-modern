@@ -73,6 +73,26 @@ fn padded_none_return_does_not_absorb_a_following_branch() {
 }
 
 #[test]
+fn padded_return_consumes_the_existing_calculated_value_once() {
+    for version in ["3.11", "3.12", "3.13", "3.14", "3.15"] {
+        for padding in [1, 3, 9] {
+            let (src, clean) = decompile_fixture(
+                &format!("carried_value_returns_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, padding {padding}: incomplete:\n{src}");
+            for value in ["make(value)", "make(value).result", "make(value), 7",
+                          "{'value': make(value)}"] {
+                assert!(src.contains(&format!("try:\n            return {value}\n")),
+                        "Python {version}, padding {padding}: lost protected value {value}:\n{src}");
+            }
+            assert_eq!(src.matches("make(value)").count(), 5, "{version}: {src}");
+            assert_eq!(src.matches("return fallback.read().result or default.result").count(), 5,
+                       "{version}: {src}");
+            assert_contains(&src, &["try:\n            make(value)\n", "return 'handled'"], version);
+        }
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

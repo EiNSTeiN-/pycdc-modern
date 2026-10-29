@@ -6061,7 +6061,27 @@ impl<'a> Ctx<'a> {
                             });
                             if !has_with {
                                 if bare_tail_span {
-                                    body.push(Stmt::Return(None));
+                                    // A padded RETURN_VALUE can consume the
+                                    // value that the protected body already
+                                    // calculated. The handler parser preserves
+                                    // that live stack; a fresh region walk has
+                                    // no value and used to fabricate a bare
+                                    // return instead. Keep only this exact
+                                    // single-expression stack and return tail.
+                                    let carried_return = self.version.at_least(3, 11)
+                                        && self.stack.len() == 1
+                                        && matches!(self.stack.last(), Some(Sv::E(_)))
+                                        && self.instrs.iter().any(|x| {
+                                            x.offset >= span_start
+                                                && x.offset < else_end
+                                                && x.op == Op::RETURN_VALUE
+                                        });
+                                    let value = if carried_return {
+                                        Some(self.pop_expr())
+                                    } else {
+                                        None
+                                    };
+                                    body.push(Stmt::Return(value));
                                 } else {
                                     // 3.14 narrows protected ranges at
                                     // value-construction boundaries: the
