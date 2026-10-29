@@ -29284,6 +29284,27 @@ return None;
                 Op::PUSH_NULL => {
                     st.push(self.name_expr("\u{0}null"));
                 }
+                Op::MAKE_FUNCTION if self.version.at_least(3, 13) => {
+                    let value = st.pop()?;
+                    let Expr::Const(value) = &*value else { return None; };
+                    let PyObject::Code(code) = &**value else { return None; };
+                    if code.name != "<genexpr>" { return None; }
+                    st.push(Rc::new(Expr::Function(Rc::new(FunctionDef {
+                        name: code.name.clone(), code: code.clone(), params: Parameters::empty(),
+                        decorators: Vec::new(), returns: None, is_async: false, type_params: Vec::new(),
+                    }))));
+                }
+                Op::SET_FUNCTION_ATTRIBUTE if ins.arg == 8 => {
+                    let function = st.pop()?;
+                    let closure = st.pop()?;
+                    let Expr::Function(definition) = &*function else { return None; };
+                    let Expr::Tuple(cells) = &*closure else { return None; };
+                    if cells.len() != definition.code.freevars.len() { return None; }
+                    // Generator captures refer to the enclosing lexical
+                    // cells; retain the function after checking their count.
+                    st.push(function);
+                }
+                Op::GET_ITER => { st.last()?; }
                 Op::COPY => {
                     if arg == 0 || arg > st.len() {
                         return None;
@@ -29340,6 +29361,23 @@ return None;
                     } else {
                         arg
                     };
+                    if self.version.at_least(3, 13) && ins.op == Op::CALL && n == 0 && st.len() >= 2 {
+                        if let Expr::Function(definition) = &*st[st.len() - 2] {
+                            if definition.code.name == "<genexpr>" {
+                                let code = definition.code.clone();
+                                let outer = st.pop()?;
+                                st.pop();
+                                let decoded = decompile(&code, self.version).ok().filter(|result| result.clean)?;
+                                let mut generators = Vec::new();
+                                let element = generator_parts_from_body(&decoded.body, &mut generators)?;
+                                generators.first_mut()?.iter = outer;
+                                st.push(Rc::new(Expr::Comprehension {
+                                    kind: CompKind::Generator, elt: element, key: None, generators,
+                                }));
+                                continue;
+                            }
+                        }
+                    }
                     let mut args = Vec::new();
                     for _ in 0..n {
                         args.push(pop1(&mut st));

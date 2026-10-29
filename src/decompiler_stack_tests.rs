@@ -249,3 +249,68 @@ fn store_fast_rejects_separate_evaluations_and_standalone_assignments() {
         assert!(ctx.sim_stack_region(0, 1, stack).is_none());
     }
 }
+
+fn nested_code(code: &CodeObject, name: &str) -> Rc<CodeObject> {
+    code.consts.iter().find_map(|value| match &**value {
+        PyObject::Code(code) if code.name == name => Some(code.clone()),
+        _ => None,
+    }).unwrap_or_else(|| panic!("missing code object {name}"))
+}
+
+#[test]
+fn bounded_generator_regions_preserve_iterables_and_captured_cells() {
+    for minor in 13..=15 {
+        let path = format!("{}/tests/pyc/bounded_generator_expressions.3.{minor}.pyc",
+                           env!("CARGO_MANIFEST_DIR"));
+        let module = PycModule::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let version = module.version();
+        for (name, expected) in [
+            ("plain", "return collect((value for value in values))"),
+            ("captured", "return collect((value + offset for value in values))"),
+            ("multiple", "return collect(((value + first) * second for value in values))"),
+        ] {
+            let code = nested_code(&module.code, name);
+            let instrs = crate::bytecode::decode_instructions(&code, table_for(version).unwrap(), version);
+            let start = instrs.iter().position(|ins| ins.op == Op::LOAD_GLOBAL).unwrap();
+            let end = instrs.iter().position(|ins| ins.op == Op::RETURN_VALUE).unwrap();
+            let ctx = context(&code, version, instrs);
+            let result = ctx.sim_stack_region(start, end, vec![])
+                .unwrap_or_else(|| panic!("3.{minor} {name}: generator construction rejected"));
+            assert_eq!(result.len(), 1, "3.{minor} {name}: {result:?}");
+            let source = crate::codegen::generate(&[Stmt::Return(Some(result[0].clone()))], version, true);
+            assert_eq!(source.trim(), expected, "3.{minor} {name}");
+        }
+        let ordinary = nested_code(&module.code, "ordinary_function");
+        let instrs = crate::bytecode::decode_instructions(&ordinary, table_for(version).unwrap(), version);
+        let start = instrs.iter().position(|ins| ins.op == Op::LOAD_CONST).unwrap();
+        let end = instrs.iter().position(|ins| ins.op == Op::RETURN_VALUE).unwrap();
+        let ctx = context(&ordinary, version, instrs);
+        assert!(ctx.sim_stack_region(start, end, vec![]).is_none());
+    }
+}
+
+#[test]
+fn bounded_generator_construction_rejects_invalid_closure_slots() {
+    let module = PycModule::from_bytes(include_bytes!(
+        "../tests/pyc/bounded_generator_expressions.3.13.pyc")).unwrap();
+    let parent = nested_code(&module.code, "captured");
+    let generator = nested_code(&parent, "<genexpr>");
+    assert_eq!(generator.freevars, ["offset"]);
+    let constant = Rc::new(Expr::Const(Rc::new(PyObject::Code(generator))));
+    let name = Rc::new(Expr::Name("offset".into()));
+    for closure in [name.clone(), Rc::new(Expr::Tuple(vec![])),
+                    Rc::new(Expr::Tuple(vec![name.clone(), name.clone()]))] {
+        let ctx = context(&parent, module.version(), vec![
+            instruction(Op::MAKE_FUNCTION, 0), instruction(Op::SET_FUNCTION_ATTRIBUTE, 8),
+        ]);
+        assert!(ctx.sim_stack_region(0, 2, vec![closure, constant.clone()]).is_none());
+    }
+    let ctx = context(&parent, module.version(), vec![
+        instruction(Op::MAKE_FUNCTION, 0), instruction(Op::SET_FUNCTION_ATTRIBUTE, 8),
+    ]);
+    let result = ctx.sim_stack_region(0, 2,
+        vec![Rc::new(Expr::Tuple(vec![name])), constant]).unwrap();
+    assert!(matches!(&*result[0], Expr::Function(_)));
+    let ctx = context(&parent, module.version(), vec![instruction(Op::GET_ITER, 0)]);
+    assert!(ctx.sim_stack_region(0, 1, vec![]).is_none());
+}
