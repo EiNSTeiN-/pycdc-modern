@@ -288,6 +288,29 @@ fn nested_contexts_carry_one_return_through_every_exit() {
 }
 
 #[test]
+fn per_row_handlers_remain_owned_by_their_loop_and_outer_try() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("loop_handler_ownership.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "try:\n        for row in owner.rows:\n            try:\n                owner.record(row)\n            except ValueError as error:",
+            "            except KeyError as error:\n                owner.other(row, str(error))",
+            "            try:\n                owner.second(row)\n            except KeyError:",
+            "            except Exception:\n                owner.failed(row)",
+            "        owner.finish()\n    except RuntimeError as error:",
+            "        owner.finish()\n    except Exception as error:",
+            "                await owner.arecord(row)\n                await owner.asecond(row)\n            except ValueError:",
+            "    finally:\n        owner.finish()",
+            "def nonloop(owner):\n    try:\n        try:\n            owner.record(owner.row)",
+            "        except ValueError:\n            owner.failed(owner.row)",
+        ], version);
+        // The compiler may sink implicit None returns into either arm.
+        let nonloop = src.split("def nonloop(owner):").nth(1).unwrap();
+        assert!(nonloop.contains("    except RuntimeError:\n        owner.fallback()"), "{src}");
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

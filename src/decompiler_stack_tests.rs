@@ -74,6 +74,7 @@ fn context(code: &CodeObject, version: PythonVersion, instrs: Vec<Instruction>) 
         sunk_pair_drop: None,
         sunk_while_lift: None,
         nested_tail_defer: false,
+        lexical_loop_handlers: FastMap::default(),
         pending_try_handlers: Vec::new(),
         pending_loop: Vec::new(),
         pending_with: Vec::new(),
