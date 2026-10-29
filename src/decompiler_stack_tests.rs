@@ -476,3 +476,36 @@ fn async_exit_ownership_preserves_displaced_and_nested_slots() {
         assert!(ctx.owned_inline_with_exit_span().is_some(), "ordinary open-With walks keep their exit handling");
     }
 }
+
+#[test]
+fn following_exception_clauses_require_bounded_typed_mismatch_protocols() {
+    let module = fixture();
+    let build = |mut prefix: Vec<Instruction>, jump_op, forward| {
+        prefix.push(instruction(Op::CHECK_EXC_MATCH, 0));
+        let mut jump = instruction(jump_op, 0);
+        jump.target = Some(if forward { 1000 } else { 0 });
+        prefix.push(jump);
+        for (i, x) in prefix.iter_mut().enumerate() { x.offset = i * 2; }
+        let mut ctx = context(&module.code, module.version(), prefix);
+        ctx.idx_of = ctx.instrs.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
+        ctx
+    };
+    for prefix in [
+        vec![instruction(Op::LOAD_GLOBAL, 0)],
+        vec![instruction(Op::LOAD_NAME, 0)],
+        vec![instruction(Op::LOAD_FAST, 0), instruction(Op::LOAD_ATTR, 0)],
+        vec![instruction(Op::LOAD_DEREF, 0), instruction(Op::LOAD_ATTR, 0)],
+        vec![instruction(Op::LOAD_GLOBAL, 0), instruction(Op::LOAD_GLOBAL, 1), instruction(Op::BUILD_TUPLE, 2)],
+    ] {
+        let ctx = build(prefix.clone(), Op::POP_JUMP_IF_FALSE, true);
+        assert_eq!(ctx.following_except_clause_end(0), Some(ctx.instrs.last().unwrap().end()));
+        assert!(build(prefix.clone(), Op::POP_JUMP_IF_FALSE, false).following_except_clause_end(0).is_none());
+        assert!(build(prefix, Op::POP_JUMP_IF_TRUE, true).following_except_clause_end(0).is_none());
+    }
+    for barrier in [Op::PUSH_EXC_INFO, Op::POP_EXCEPT, Op::RERAISE, Op::CALL, Op::JUMP_FORWARD] {
+        let ctx = build(vec![instruction(Op::LOAD_GLOBAL, 0), instruction(barrier, 0)], Op::POP_JUMP_IF_FALSE, true);
+        assert!(ctx.following_except_clause_end(0).is_none(), "must stop at {barrier:?}");
+    }
+    let ctx = build(vec![instruction(Op::NOP, 0); 32], Op::POP_JUMP_IF_FALSE, true);
+    assert!(ctx.following_except_clause_end(0).is_none());
+}

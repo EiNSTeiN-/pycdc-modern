@@ -345,6 +345,27 @@ fn async_return_padding_never_turns_a_carried_exit_into_a_normal_exit() {
 }
 
 #[test]
+fn private_handler_bodies_do_not_hide_later_typed_clauses() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("private_handler_clauses.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "except RuntimeError as inner:\n                    await owner.log('close-failed', str(inner))",
+            "        except ValueError as error:\n            await owner.log('invalid', str(error))",
+            "        except (OSError, asyncio.TimeoutError) as error:\n            await owner.log('transient', str(error))",
+            "        except Exception as error:\n            await owner.log('unavailable', str(error))",
+            "        except ValueError as error:\n            owner.log('invalid', str(error))",
+            "        except faults.invalid as error:",
+            "        except (faults.operating, faults.timeout) as error:",
+            "        except faults.ordinary as error:",
+            "    await owner.log('finished', accepted)\n    return accepted",
+            "async def single_clause(owner):", "async def no_private_try(owner):",
+        ], version);
+        assert_eq!(src.matches("except (faults.operating, faults.timeout)").count(), 2);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
