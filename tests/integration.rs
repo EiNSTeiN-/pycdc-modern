@@ -1225,3 +1225,22 @@ fn python315_shapes_recover_changed_encodings() {
     assert!(!src.contains("/*with-result*/"), "unresolved with target:\n{src}");
     assert!(!src.contains('\0'), "PUSH_NULL marker leaked:\n{src}");
 }
+
+#[test]
+fn none_rejection_guards_preserve_chains_calls_and_success_returns() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("none_rejection_guards.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "if value is None or not 0.0 <= value <= 15.0:",
+            "if read is None or not 0.0 <= read() <= 15.0:",
+            "if first is None or not 0.0 <= first() <= second() <= 15.0:",
+            "if read is None or not 0.0 <= read() or not read() <= 15.0:",
+            "def same_tail(value):\n    if value is None or not 0.0 <= value <= 15.0:\n        return False\n    return False",
+            "return 3\n    return 5",
+            "return 'reject'\n    return 'accept'",
+            "if a is None or b is None or c is None or d is None or d < 0.01:\n            continue",
+        ], version);
+        assert_eq!(src.matches("            continue").count(), 2, "{version}: {src}");
+    }
+}
