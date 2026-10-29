@@ -183,6 +183,32 @@ fn generator_walrus_keeps_its_parent_cell_and_short_circuit_value() {
 }
 
 #[test]
+fn suspension_cleanup_does_not_split_async_with_exception_suites() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("await_exception_regions.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "async with manager:\n        try:\n            await work('a')\n        finally:\n            record('cleanup')\n        await work('b')\n        return 'tail'",
+            "async with manager:\n        try:\n            a = await work('a')\n        except ValueError:\n            record('handled')\n        else:\n            await work('b')\n        return 'tail'",
+        ], version);
+    }
+}
+
+#[test]
+fn await_region_reconstruction_preserves_adjacent_contexts_and_outer_handlers() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("await_context_controls.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "async with manager:\n        a = await work('a')\n    async with manager:\n        b = await work('b')\n    return a, b",
+            "try:\n        a = await work('a')\n        async with manager:",
+            "try:\n        async with manager:\n            a = await work('a')\n            b = await work('b')",
+            "except ValueError:\n        return 'handled'\n    return a, b",
+        ], version);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

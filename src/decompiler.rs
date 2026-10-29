@@ -872,6 +872,13 @@ pub fn decompile_in_scope(
             let Some(&hi) = idx_of.get(&e.target) else {
                 return true;
             };
+            if version.at_least(3, 14)
+                && instrs.get(hi).map(|instruction| instruction.op) == Some(Op::CLEANUP_THROW)
+            {
+                // Await/yield suspension cleanup is interpreter protocol,
+                // even when followed by a backward jump and user handlers.
+                return false;
+            }
             let mut saw_reraise = false;
             for ins in instrs.iter().skip(hi).take(14) {
                 if matches!(ins.op, Op::RERAISE) {
@@ -886,6 +893,44 @@ pub fn decompile_in_scope(
             }
             !saw_reraise
         });
+    }
+
+    if version.at_least(3, 14) {
+        // Await suspension splits one source try into fragments, and its
+        // out-of-line CLEANUP_THROW trampoline can itself be protected by
+        // the same source handler. Rebuild the lexical await region before
+        // deriving try contexts; keep the original table for VM glue.
+        exc_entries.retain(|entry| {
+            idx_of.get(&entry.start).and_then(|index| instrs.get(*index))
+                .map_or(true, |instruction| instruction.op != Op::CLEANUP_THROW)
+        });
+        let mut grouped: std::collections::BTreeMap<(usize, u32, bool), Vec<crate::code::ExceptionEntry>> =
+            std::collections::BTreeMap::new();
+        for entry in exc_entries.drain(..) {
+            grouped.entry((entry.target, entry.depth, entry.lasti)).or_default().push(entry);
+        }
+        for (_, mut entries) in grouped {
+            entries.sort_by_key(|entry| entry.start);
+            let mut merged: Vec<crate::code::ExceptionEntry> = Vec::new();
+            for entry in entries {
+                let join = merged.last().map_or(false, |previous| {
+                    entry.start >= previous.end
+                        && instrs.iter().filter(|instruction| {
+                            instruction.offset >= previous.end && instruction.offset < entry.start
+                        }).all(|instruction| matches!(instruction.op,
+                            Op::SEND | Op::YIELD_VALUE | Op::RESUME | Op::RESUME_CHECK
+                            | Op::JUMP_BACKWARD_NO_INTERRUPT | Op::END_SEND
+                            | Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                });
+                if join {
+                    merged.last_mut().unwrap().end = entry.end;
+                } else {
+                    merged.push(entry);
+                }
+            }
+            exc_entries.extend(merged);
+        }
+        exc_entries.sort_by_key(|entry| entry.start);
     }
 
     // classify exception-table targets: handlers starting with PUSH_EXC_INFO
@@ -1049,11 +1094,22 @@ pub fn decompile_in_scope(
                                 | Op::CALL_FUNCTION
                                 | Op::RETURN_VALUE
                                 | Op::RETURN_CONST
+                                | Op::LOAD_SMALL_INT
+                                | Op::GET_AWAITABLE
+                                | Op::SEND
+                                | Op::END_SEND
+                                | Op::YIELD_VALUE
+                                | Op::YIELD_FROM
+                                | Op::RESUME
+                                | Op::RESUME_CHECK
+                                | Op::JUMP_BACKWARD_NO_INTERRUPT
                         ) || (x.op == Op::LOAD_CONST
                             && matches!(
                                 code.consts.get(x.arg as usize).map(|o| &**o),
                                 Some(PyObject::None)
-                            ))
+                            )) || (version.at_least(3, 14) && exc_entries.iter().any(|entry| {
+                                entry.start <= x.offset && x.offset < entry.end && entry.target != t
+                            }))
                     }) && gap.iter().any(|x| {
                         matches!(x.op, Op::RETURN_VALUE | Op::RETURN_CONST)
                     });
