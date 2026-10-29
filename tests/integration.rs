@@ -26,6 +26,28 @@ fn assert_contains(haystack: &str, needles: &[&str], ctx: &str) {
 }
 
 #[test]
+fn disjunction_inside_for_preserves_each_operand_and_else() {
+    for version in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("for_loop_disjunctions.{version}.pyc"));
+        assert!(clean, "Python {version}: output marked incomplete:\n{src}");
+        assert_contains(
+            &src,
+            &[
+                "for value in values:\n        if not test(value) or value < 0.2:",
+                "for value in values:\n        if not value or value < 0.2:",
+                "for value in values:\n        if value is None or value < 0.2:",
+                "for value in values:\n        if test(value) or value < 0.2:",
+                "else:\n            result.append('wet')",
+                "while value < 2 or value == 3:",
+                "result.append('complete')",
+                "result.append('tail')",
+            ],
+            version,
+        );
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

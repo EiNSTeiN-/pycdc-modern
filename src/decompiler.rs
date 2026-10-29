@@ -23216,9 +23216,17 @@ impl<'a> Ctx<'a> {
         // rotated `while a or b:` — the body region loops back to this
         // condition; leave it to the while machinery
         if let (Some(&bi), Some(&ei)) = (self.idx_of.get(&target), self.idx_of.get(&exit)) {
+            let outer_for_top = self.blocks.iter().rev()
+                .find(|block| matches!(block.kind, BlockType::For | BlockType::While))
+                .filter(|block| block.kind == BlockType::For && block.start < self.cur_offset)
+                .map(|block| block.start);
             if self.instrs[bi..ei]
                 .iter()
-                .any(|x| x.is_backward && x.target.map_or(false, |t| t <= self.cur_offset))
+                .any(|x| x.is_backward && x.target.map_or(false, |t| {
+                    t <= self.cur_offset && !outer_for_top.map_or(false, |top| {
+                        t == top || self.is_loop_top_prefix(t, top)
+                    })
+                }))
             {
                 return None;
             }
