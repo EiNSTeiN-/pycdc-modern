@@ -47,5 +47,3 @@ async def async_outer_return(contexts, value):
         async with contexts[1]:
             result = await value()
         return result
-
-

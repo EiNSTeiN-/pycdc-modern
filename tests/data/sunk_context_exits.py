@@ -50,5 +50,3 @@ async def normal(lock, pending, release, user_call):
         record("ready")
     record("outside")
     return True
-
-

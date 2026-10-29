@@ -117,5 +117,3 @@ def nonloop(owner):
     except RuntimeError:
         owner.fallback()
     return None
-
-

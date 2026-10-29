@@ -161,5 +161,3 @@ async def no_private_try(owner):
             continue
     await owner.log("finished", accepted)
     return accepted
-
-

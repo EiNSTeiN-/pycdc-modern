@@ -39,4 +39,3 @@ def observed_rows():
 
 
 print(repeated_targets(observed_rows()))
-

@@ -138,5 +138,3 @@ async def direct_unnamed_break(owner):
             break
     await owner.log("finished", accepted)
     return accepted
-
-

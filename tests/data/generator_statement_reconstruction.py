@@ -14,4 +14,3 @@ def captured_cells(rows):
     deltas = rows
     factory = sum
     return sorted(sum(factory(deltas) for _ in deltas) / len(deltas) for _ in range(3))
-

@@ -83,5 +83,3 @@ async def branch_return(owner):
             return 4
         await owner.write(1, 2)
     return 2
-
-

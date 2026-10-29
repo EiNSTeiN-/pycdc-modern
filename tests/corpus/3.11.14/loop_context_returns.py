@@ -62,5 +62,3 @@ async def async_mapping(lock, rows, parse):
             except ValueError:
                 continue
         return {"rows": result}
-
-
