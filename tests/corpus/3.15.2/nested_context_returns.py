@@ -42,4 +42,10 @@ def sync_outer_return(contexts, value):
         return result
 
 
+async def async_outer_return(contexts, value):
+    async with contexts[0]:
+        async with contexts[1]:
+            result = await value()
+        return result
+
 

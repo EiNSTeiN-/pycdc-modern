@@ -382,3 +382,97 @@ fn nested_context_return_matcher_requires_complete_exit_groups_and_slots() {
         }
     }
 }
+
+#[test]
+fn normal_async_exit_spans_recognize_actual_suspension_protocols() {
+    for minor in [14, 15] {
+        let path = format!("{}/tests/pyc/normal_async_exits.3.{minor}.pyc", env!("CARGO_MANIFEST_DIR"));
+        let module = PycModule::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let code = nested_code(&module.code, "normal_1");
+        let version = module.version();
+        let instrs = crate::bytecode::decode_instructions(&code, table_for(version).unwrap(), version);
+        let mut ctx = context(&code, version, instrs);
+        ctx.idx_of = ctx.instrs.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
+        let starts: Vec<_> = ctx.instrs.windows(3).enumerate()
+            .filter(|(_, group)| group.iter().all(|x| ctx.loads_none(x.op, x.arg)))
+            .map(|(i, group)| (i, group[0].offset)).collect();
+        assert_eq!(starts.len(), 2);
+        for (i, off) in starts {
+            assert!(ctx.inline_with_exit_span(off).is_some(), "3.{minor} exit at {off}: {:?}", &ctx.instrs[i..i+16]);
+        }
+    }
+}
+
+#[test]
+fn async_normal_exit_rejects_user_awaits_broken_loops_and_return_tails() {
+    for minor in [14, 15] {
+        let path = format!("{}/tests/pyc/normal_async_exits.3.{minor}.pyc", env!("CARGO_MANIFEST_DIR"));
+        let module = PycModule::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let code = nested_code(&module.code, "normal_1");
+        let version = module.version();
+        let instrs = crate::bytecode::decode_instructions(&code, table_for(version).unwrap(), version);
+        let make = |instrs| {
+            let mut ctx = context(&code, version, instrs);
+            ctx.idx_of = ctx.instrs.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
+            ctx
+        };
+        let ctx = make(instrs.clone());
+        let start = ctx.instrs.windows(3).position(|group| group.iter().all(|x| ctx.loads_none(x.op, x.arg))).unwrap();
+        let off = ctx.instrs[start].offset;
+        let after = ctx.inline_with_exit_span(off).unwrap();
+        let end = ctx.idx_of[&after];
+        for mutation in 0..4 {
+            let mut bad = instrs.clone();
+            let span = &mut bad[start..end];
+            match mutation {
+                0 => span.iter_mut().find(|x| x.op == Op::GET_AWAITABLE).unwrap().arg = 0,
+                1 => span.iter_mut().find(|x| x.op == Op::JUMP_BACKWARD_NO_INTERRUPT).unwrap().target = Some(off),
+                2 => span.iter_mut().find(|x| x.op == Op::END_SEND).unwrap().op = Op::NOP,
+                _ => span.iter_mut().find(|x| x.op == Op::RESUME).unwrap().op = Op::LOAD_GLOBAL,
+            }
+            assert!(make(bad).inline_with_exit_span(off).is_none(), "3.{minor}: mutation {mutation}");
+        }
+        for padding in [0, 1, 3, 9] {
+            for constant in [false, true] {
+                let mut tail = instrs[..end].to_vec();
+                tail.extend((0..padding).map(|_| instruction(Op::NOP, 0)));
+                if constant {
+                    tail.push(instruction(Op::LOAD_SMALL_INT, 4));
+                    tail.extend((0..padding).map(|_| instruction(Op::NOP, 0)));
+                }
+                tail.push(instruction(Op::RETURN_VALUE, 0));
+                for (i, item) in tail[end..].iter_mut().enumerate() { item.offset = after + i * 2; }
+                assert!(make(tail).inline_with_exit_span(off).is_none(), "3.{minor}: carried return with {padding} pads");
+            }
+        }
+    }
+}
+
+#[test]
+fn async_exit_ownership_preserves_displaced_and_nested_slots() {
+    for minor in [14, 15] {
+        let path = format!("{}/tests/pyc/normal_async_exits.3.{minor}.pyc", env!("CARGO_MANIFEST_DIR"));
+        let module = PycModule::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let code = nested_code(&module.code, "normal_1");
+        let version = module.version();
+        let instrs = crate::bytecode::decode_instructions(&code, table_for(version).unwrap(), version);
+        let mut ctx = context(&code, version, instrs);
+        ctx.idx_of = ctx.instrs.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
+        ctx.cur_offset = ctx.instrs.windows(3).find(|group| group.iter().all(|x| ctx.loads_none(x.op, x.arg))).unwrap()[0].offset;
+        let after = ctx.inline_with_exit_span(ctx.cur_offset).unwrap();
+        assert!(ctx.owned_inline_with_exit_span().is_some());
+        ctx.exc_entries.push(crate::code::ExceptionEntry { start: ctx.cur_offset, end: after, target: 999, depth: 2, lasti: true });
+        ctx.with_region_handlers.insert(1, 999);
+        assert!(ctx.owned_inline_with_exit_span().is_none(), "lost Try and With must retain the protected exit");
+        ctx.blocks.push(Block::new(BlockType::Try, 0, after));
+        assert!(ctx.owned_inline_with_exit_span().is_none(), "a displaced Try has no owning With");
+        let mut owner = Block::new(BlockType::With, 0, after);
+        owner.with_handler = Some(999);
+        ctx.blocks.push(owner);
+        assert!(ctx.owned_inline_with_exit_span().is_none(), "the open owner's handler protects an inner exit");
+        ctx.blocks.last_mut().unwrap().with_handler = Some(1001);
+        assert!(ctx.owned_inline_with_exit_span().is_some());
+        ctx.blocks.remove(1);
+        assert!(ctx.owned_inline_with_exit_span().is_some(), "ordinary open-With walks keep their exit handling");
+    }
+}

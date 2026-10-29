@@ -283,6 +283,7 @@ fn nested_contexts_carry_one_return_through_every_exit() {
             "async with contexts[0]:\n        async with contexts[1]:\n            return (value(),)",
             "async with contexts[0]:\n        return await value()",
             "result = value()\n        return result",
+            "result = await value()\n        return result",
         ], version);
     }
 }
@@ -307,6 +308,39 @@ fn per_row_handlers_remain_owned_by_their_loop_and_outer_try() {
         // The compiler may sink implicit None returns into either arm.
         let nonloop = src.split("def nonloop(owner):").nth(1).unwrap();
         assert!(nonloop.contains("    except RuntimeError:\n        owner.fallback()"), "{src}");
+    }
+}
+
+#[test]
+fn normal_async_exits_close_only_their_own_context() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("normal_async_exits.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "row0 = await query.read()\n    value = owner.build(row0, row0)",
+            "row3 = await query.read()\n    value = owner.build(row0, row3)",
+            "row0 = await query.read()\n        async with owner.query('row1') as query:",
+            "row0 = await query.read()\n        return 4",
+            "row0 = await query.read()\n        return row0",
+            "row1 = await query.read()\n        return owner.build(row0, row0)",
+            "row1 = await query.read()\n        return {'value': row0}",
+            "await owner.user(None, None, None)\n        return owner.build(1, 2)",
+            "if owner.ready:\n            return 4\n        await owner.write(1, 2)\n    return 2",
+        ], version);
+    }
+}
+
+#[test]
+fn async_return_padding_never_turns_a_carried_exit_into_a_normal_exit() {
+    for version in ["3.14", "3.15"] {
+        for padding in [1, 3, 9] {
+            let (src, clean) = decompile_fixture(&format!("async_context_return_padding_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, padding {padding}: incomplete:\n{src}");
+            assert_contains(&src, &[
+                "row0 = await query.read()\n        return 4",
+                "row0 = await query.read()\n        return {'value': row0}",
+            ], version);
+        }
     }
 }
 

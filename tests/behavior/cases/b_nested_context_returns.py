@@ -46,6 +46,13 @@ def sync_outer_return(contexts, value):
 
 
 
+async def async_outer_return(contexts, value):
+    async with contexts[0]:
+        async with contexts[1]:
+            result = await value()
+        return result
+
+
 events = []
 opened = set()
 
@@ -98,6 +105,7 @@ cases = [
     (async_tuple, 2, False),
     (async_single, 1, True),
     (sync_outer_return, 2, False),
+    (async_outer_return, 2, True),
 ]
 for function, depth, isawait in cases:
     for failure in ("", "body", "cancelled", "enter-0", "enter-1", "enter-2", "exit-0", "exit-1", "exit-2"):

@@ -11312,7 +11312,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// 3.12+ inline with success-exit span: `LOAD None; LOAD None;
-    /// LOAD None; CALL; POP_TOP` starting at `off` — returns the offset
+    /// LOAD None; CALL; [async exit await;] POP_TOP` starting at `off` — returns the offset
     /// just past the POP_TOP. The callable is the VM-managed bound
     /// __exit__ (never modeled); the sequence is pure machinery.
     fn inline_with_exit_span(&self, off: usize) -> Option<usize> {
@@ -11366,7 +11366,72 @@ impl<'a> Ctx<'a> {
         while matches!(self.instrs.get(k).map(|x| x.op), Some(op) if matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)) {
             k += 1;
         }
+        let mut async_exit = false;
+        if self.version.at_least(3, 14)
+            && self.instrs.get(k).map(|x| (x.op, x.arg)) == Some((Op::GET_AWAITABLE, 2))
+        {
+            // The compiler marks an __aexit__ await with operand 2. A
+            // user-authored await uses operand 0 and must remain visible.
+            // Consume only a complete SEND loop ending in END_SEND.
+            k += 1;
+            if self.version.at_least(3, 15)
+                && self.instrs.get(k).map(|x| x.op) == Some(Op::PUSH_NULL)
+            {
+                k += 1;
+            }
+            let none = self.instrs.get(k)?;
+            if !self.loads_none(none.op, none.arg) {
+                return None;
+            }
+            k += 1;
+            let send = self.instrs.get(k)?;
+            if send.op != Op::SEND {
+                return None;
+            }
+            let end = *self.idx_of.get(&send.target?)?;
+            if end <= k || end - k > 12 || self.instrs[end].op != Op::END_SEND {
+                return None;
+            }
+            let loop_body = &self.instrs[k + 1..end];
+            if !loop_body.iter().any(|x| x.op == Op::YIELD_VALUE)
+                || !loop_body.iter().any(|x| {
+                    x.op == Op::JUMP_BACKWARD_NO_INTERRUPT && x.target == Some(send.offset)
+                })
+                || loop_body.iter().any(|x| {
+                    !matches!(x.op, Op::YIELD_VALUE | Op::RESUME | Op::CLEANUP_THROW
+                        | Op::JUMP_BACKWARD_NO_INTERRUPT | Op::NOP | Op::NOT_TAKEN | Op::CACHE)
+                        || (x.op == Op::JUMP_BACKWARD_NO_INTERRUPT && x.target != Some(send.offset))
+                })
+            {
+                return None;
+            }
+            k = end + 1;
+            async_exit = true;
+            while matches!(self.instrs.get(k).map(|x| x.op), Some(op) if matches!(op, Op::NOP | Op::NOT_TAKEN | Op::CACHE)) {
+                k += 1;
+            }
+        }
         if self.instrs.get(k).map(|x| x.op) != Some(Op::POP_TOP) {
+            return None;
+        }
+        let mut tail = k + 1;
+        while self.instrs.get(tail).map_or(false, |x| is_pad(x)) {
+            tail += 1;
+        }
+        let mut return_at = tail + 1;
+        while self.instrs.get(return_at).map_or(false, |x| is_pad(x)) {
+            return_at += 1;
+        }
+        if async_exit && self.instrs.get(tail).map_or(false, |x| {
+            matches!(x.op, Op::RETURN_VALUE | Op::RETURN_CONST)
+                || (matches!(x.op, Op::LOAD_CONST | Op::LOAD_SMALL_INT | Op::LOAD_COMMON_CONSTANT)
+                    && self.instrs.get(return_at).map_or(false, |next| {
+                    matches!(next.op, Op::RETURN_VALUE | Op::RETURN_CONST)
+                }))
+        }) {
+            // A calculated return can carry its value through this same
+            // exit await. Keep the historical return protocol; closing the
+            // With here can discard that value or eject its source Return.
             return None;
         }
         Some(self.instrs[k].end())
@@ -13843,6 +13908,54 @@ fn short(sv: &Sv) -> String {
 use crate::opcode::Op;
 
 impl<'a> Ctx<'a> {
+    /// Recognize only an exit owned by the current lexical walk. Both
+    /// constant encodings must preserve nested and displaced return slots.
+    fn owned_inline_with_exit_span(&self) -> Option<usize> {
+        self.inline_with_exit_span(self.cur_offset).filter(|after| {
+            let is_async_exit = self.instrs.iter().any(|instruction| {
+                instruction.offset >= self.cur_offset
+                    && instruction.offset < *after
+                    && instruction.op == Op::GET_AWAITABLE
+                    && instruction.arg == 2
+            });
+            let split_protected_walk = self.blocks.iter().any(|block| block.kind == BlockType::Try);
+            if !is_async_exit {
+                return true;
+            }
+            if !split_protected_walk {
+                // A split handler walk can lose both its Try and
+                // lexical With blocks while the original exception
+                // table still protects a nested exit. Preserve the
+                // existing protocol in that displaced fragment;
+                // ordinary open-With walks keep their established
+                // success-exit handling.
+                let has_open_with = self.blocks.iter().any(|block| block.kind == BlockType::With);
+                let protected_by_with = self.exc_entries.iter().any(|entry| {
+                    entry.start <= self.cur_offset
+                        && self.cur_offset < entry.end
+                        && self.with_region_handlers.values().any(|handler| *handler == entry.target)
+                });
+                return has_open_with || !protected_by_with;
+            }
+            let Some(owner) = self.blocks.iter().rfind(|block| block.kind == BlockType::With) else {
+                // A displaced return must retain its protocol
+                // value for the source fidelity reconstruction.
+                return false;
+            };
+            // An exit protected by the open With belongs to a
+            // nested context. Keep its existing CALL/accounting
+            // path; consuming it here also consumes the outer
+            // return's exit slot in a split protected walk.
+            !owner.with_handler.map_or(false, |handler| {
+                self.exc_entries.iter().any(|entry| {
+                    entry.start <= self.cur_offset
+                        && self.cur_offset < entry.end
+                        && entry.target == handler
+                })
+            })
+        })
+    }
+
     /// Execute one instruction. Returns false when the instruction stream
     /// should stop being processed (unconditional exit).
     /// 3.15 spells the inline with's three None exit arguments as
@@ -13852,7 +13965,7 @@ impl<'a> Ctx<'a> {
         if !self.version.at_least(3, 15) || self.with_exits == 0 {
             return false;
         }
-        let Some(after) = self.inline_with_exit_span(self.cur_offset) else {
+        let Some(after) = self.owned_inline_with_exit_span() else {
             return false;
         };
         let nested_end_here = self.with_regions.iter().any(|(k, v)| {
@@ -13918,7 +14031,7 @@ impl<'a> Ctx<'a> {
                 // _maybe_compile: the leak rendered `None(None, None)`
                 // and trapped the post-with tail return inside the with)
                 if self.version.at_least(3, 11) && self.with_exits > 0 {
-                    if let Some(after) = self.inline_with_exit_span(self.cur_offset) {
+                    if let Some(after) = self.owned_inline_with_exit_span() {
                         // close the With ONLY when it is topmost: a sunk
                         // exit inside an open branch arm (`if quitting:
                         // return` — bdb 3.12 trace_dispatch) must keep
@@ -14558,6 +14671,10 @@ impl<'a> Ctx<'a> {
                                             | Op::END_SEND
                                             | Op::CLEANUP_THROW
                                             | Op::LOAD_CONST
+                                            // 3.15's await setup has a null SEND
+                                            // slot and a shared None constant.
+                                            | Op::PUSH_NULL
+                                            | Op::LOAD_COMMON_CONSTANT
                                             | Op::NOP
                                             | Op::NOT_TAKEN
                                             | Op::END_ASYNC_FOR
