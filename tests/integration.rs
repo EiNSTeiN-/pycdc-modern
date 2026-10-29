@@ -169,6 +169,20 @@ fn filtered_generators_keep_boolean_values_separate_from_rejection_guards() {
 }
 
 #[test]
+fn generator_walrus_keeps_its_parent_cell_and_short_circuit_value() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("generator_walrus_cells.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "isinstance(row, dict) and (change := row.get('change')) is not None and change >= 0",
+            "change = 'initial'", "return results, change",
+        ], version);
+        assert_eq!(src.matches("change :=").count(), 2, "{version}: {src}");
+        assert!(!src.contains("nonlocal "), "{version}: declaration escaped its generator:\n{src}");
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

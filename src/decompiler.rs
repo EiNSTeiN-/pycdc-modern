@@ -29369,7 +29369,7 @@ return None;
                                 st.pop();
                                 let decoded = decompile(&code, self.version).ok().filter(|result| result.clean)?;
                                 let mut generators = Vec::new();
-                                let element = generator_parts_from_body(&decoded.body, &mut generators)?;
+                                let element = generator_parts_from_body(&decoded.body, &mut generators, &code.freevars)?;
                                 generators.first_mut()?.iter = outer;
                                 st.push(Rc::new(Expr::Comprehension {
                                     kind: CompKind::Generator, elt: element, key: None, generators,
@@ -51759,7 +51759,7 @@ impl<'a> Ctx<'a> {
 // tree for eligible 3.12+ generators, retaining the legacy simulator as a
 // fallback when the statement result is incomplete or not a generator tree.
 fn generator_parts_from_body(
-    body: &[Stmt], generators: &mut Vec<Comprehension>,
+    body: &[Stmt], generators: &mut Vec<Comprehension>, freevars: &[String],
 ) -> Option<ExprRef> {
     let mut result = None;
     for statement in body {
@@ -51770,7 +51770,7 @@ fn generator_parts_from_body(
                     target: target.clone(), iter: iter.clone(), ifs: Vec::new(),
                     is_async: *is_async, if_line_break: false,
                 });
-                result = generator_parts_from_body(body, generators);
+                result = generator_parts_from_body(body, generators, freevars);
                 if result.is_none() { return None; }
             }
             // A rejected iteration can be an inverted continue guard,
@@ -51784,7 +51784,7 @@ fn generator_parts_from_body(
             Stmt::If { cond, body, orelse } if orelse.is_empty() => {
                 if result.is_some() { return None; }
                 generators.last_mut()?.ifs.push(cond.clone());
-                result = generator_parts_from_body(body, generators);
+                result = generator_parts_from_body(body, generators, freevars);
                 if result.is_none() { return None; }
             }
             Stmt::Expr(value) => {
@@ -51797,6 +51797,10 @@ fn generator_parts_from_body(
                     _ => return None,
                 }
             }
+            // Generator walrus targets bind enclosing cells. Their Named
+            // expressions retain the stores; the parent supplies the scope.
+            // Never discard global or unrelated nonlocal declarations.
+            Stmt::Nonlocal(names) if names.iter().all(|name| freevars.contains(name)) => {},
             Stmt::Pass | Stmt::Return(None) => {},
             Stmt::Return(Some(value))
                 if matches!(&**value, Expr::Const(object) if matches!(&**object, PyObject::None)) => {},
@@ -52071,7 +52075,7 @@ fn genexpr_ternary_merge(
         if self.version.at_least(3, 12) && matches!(_kind, CompKind::Generator) {
             if let Some(statements) = decompile(code, self.version).ok().filter(|result| result.clean) {
                 let mut generators = Vec::new();
-                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
+                if let Some(element) = generator_parts_from_body(&statements.body, &mut generators, &code.freevars) {
                     if !generators.is_empty() {
                         // In 3.12, a filter on a separate source line jumps
                         // to the shared back edge instead of to the yield.
@@ -54155,6 +54159,22 @@ mod generator_parts_tests {
     }
 
     #[test]
+    fn extraction_omits_only_declarations_for_real_enclosing_cells() {
+        let declaration = Stmt::Nonlocal(vec!["change".into()]);
+        let body = vec![declaration.clone(), yielded_loop()];
+        assert!(generator_parts_from_body(&body, &mut Vec::new(), &["change".into()]).is_some());
+        assert!(generator_parts_from_body(&body, &mut Vec::new(), &[]).is_none());
+        for declaration in [
+            Stmt::Global(vec!["change".into()]),
+            Stmt::Nonlocal(vec!["change".into(), "unrelated".into()]),
+        ] {
+            assert!(generator_parts_from_body(
+                &[declaration, yielded_loop()], &mut Vec::new(), &["change".into()],
+            ).is_none());
+        }
+    }
+
+    #[test]
     fn extraction_accepts_only_an_early_continue_guard() {
         let guard = Stmt::If {
             cond: Rc::new(Expr::Name("skip".into())),
@@ -54163,13 +54183,13 @@ mod generator_parts_tests {
         let mut accepted = yielded_loop();
         if let Stmt::For { body, .. } = &mut accepted { body.insert(0, guard.clone()); }
         let mut clauses = Vec::new();
-        assert!(generator_parts_from_body(&[accepted], &mut clauses).is_some());
+        assert!(generator_parts_from_body(&[accepted], &mut clauses, &[]).is_some());
         assert_eq!(clauses[0].ifs.len(), 1);
         assert!(matches!(&*clauses[0].ifs[0], Expr::Unary { op: UnaryOp::Not, .. }));
-        assert!(generator_parts_from_body(&[guard.clone()], &mut Vec::new()).is_none());
+        assert!(generator_parts_from_body(&[guard.clone()], &mut Vec::new(), &[]).is_none());
         let mut late = yielded_loop();
         if let Stmt::For { body, .. } = &mut late { body.push(guard.clone()); }
-        assert!(generator_parts_from_body(&[late], &mut Vec::new()).is_none());
+        assert!(generator_parts_from_body(&[late], &mut Vec::new(), &[]).is_none());
         for add_else in [false, true] {
             let mut rejected = guard.clone();
             if let Stmt::If { body, orelse, .. } = &mut rejected {
@@ -54177,7 +54197,7 @@ mod generator_parts_tests {
             }
             let mut enclosing = yielded_loop();
             if let Stmt::For { body, .. } = &mut enclosing { body.insert(0, rejected); }
-            assert!(generator_parts_from_body(&[enclosing], &mut Vec::new()).is_none());
+            assert!(generator_parts_from_body(&[enclosing], &mut Vec::new(), &[]).is_none());
         }
     }
 
@@ -54185,14 +54205,14 @@ mod generator_parts_tests {
     fn extraction_preserves_one_yield_path_and_rejects_siblings() {
         let body = vec![yielded_loop()];
         let mut generators = Vec::new();
-        let element = generator_parts_from_body(&body, &mut generators).unwrap();
+        let element = generator_parts_from_body(&body, &mut generators, &[]).unwrap();
         assert!(matches!(&*element, Expr::Name(name) if name == "row"));
         assert_eq!(generators.len(), 1);
 
         let mut generators = Vec::new();
         assert!(generator_parts_from_body(
             &[yielded_loop(), yielded_loop()], &mut generators,
-        ).is_none());
+         &[]).is_none());
 
         let branch = Stmt::If {
             cond: Rc::new(Expr::Name("ready".into())),
@@ -54205,7 +54225,7 @@ mod generator_parts_tests {
         if let Stmt::For { body, .. } = &mut body {
             *body = vec![branch.clone(), branch];
         }
-        assert!(generator_parts_from_body(&[body], &mut Vec::new()).is_none());
+        assert!(generator_parts_from_body(&[body], &mut Vec::new(), &[]).is_none());
     }
 
     #[test]
@@ -54218,12 +54238,12 @@ mod generator_parts_tests {
             };
             assert!(generator_parts_from_body(
                 &[assignment, yielded_loop()], &mut Vec::new(),
-            ).is_none());
+             &[]).is_none());
         }
         let mut body = yielded_loop();
         if let Stmt::For { orelse, .. } = &mut body {
             *orelse = vec![Stmt::Pass];
         }
-        assert!(generator_parts_from_body(&[body], &mut Vec::new()).is_none());
+        assert!(generator_parts_from_body(&[body], &mut Vec::new(), &[]).is_none());
     }
 }
