@@ -209,6 +209,33 @@ fn await_region_reconstruction_preserves_adjacent_contexts_and_outer_handlers() 
 }
 
 #[test]
+fn early_context_returns_preserve_finally_and_remaining_exit_bookkeeping() {
+    for version in ["3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("context_exit_accounting.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "async with manager:\n        if flag:\n            return 'early'\n        try:\n            return await work('a')\n        finally:\n            record('cleanup')",
+            "async with manager:\n        try:\n            return await work('a')\n        finally:\n            record('cleanup')",
+            "async with manager:\n        if flag is None:\n            return 3\n        try:\n            return await work('a')\n        finally:\n            record('cleanup')",
+        ], version);
+    }
+}
+
+#[test]
+fn context_managers_keep_return_values_inside_the_body() {
+    for version in ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(&format!("context_manager_returns.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "def synchronous(manager):\n    with manager as value:\n        return value",
+            "def synchronous_attribute(manager):\n    with manager as value:\n        return value.result",
+            "async def asynchronous(manager):\n    async with manager as value:\n        return value",
+            "async def asynchronous_attribute(manager):\n    async with manager as value:\n        return value.result",
+        ], version);
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

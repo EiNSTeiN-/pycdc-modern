@@ -4804,6 +4804,18 @@ impl<'a> Ctx<'a> {
         // handler chain — statements AFTER the copy (post-try code inside
         // a loop iteration) belong to the main walk, not the finally
         let mut fin_span_stop = stop;
+        if self.version.at_least(3, 14)
+            && self.blocks.iter().any(|block| block.kind == BlockType::With)
+        {
+            if let Some(tail) = self.instrs.iter().enumerate().find_map(|(index, instruction)| {
+                if instruction.offset >= pos && instruction.offset < fin_span_stop
+                    && instruction.op == Op::SWAP && self.with_return_tail_end(index).is_some()
+                { Some(instruction.offset) } else { None }
+            }) {
+                stop = tail;
+                fin_span_stop = tail;
+            }
+        }
         // the inline-copy mirror verdict: false means the span at `pos`
         // does NOT opcode-mirror the finally chain's copy — there is no
         // inline copy here (an always-raising try body has no normal
@@ -5127,6 +5139,8 @@ impl<'a> Ctx<'a> {
                 let r = &self.instrs[ri];
                 if r.op == Op::RETURN_VALUE {
                     Some(r.end())
+                } else if self.version.at_least(3, 14) && r.op == Op::SWAP {
+                    self.with_return_tail_end(ri)
                 } else {
                     None
                 }
@@ -41941,11 +41955,8 @@ if split_cond {
                     k += 1;
                 }
                 Op::POP_FINALLY => k += 1,
-                Op::LOAD_CONST
-                    if matches!(
-                        self.code.consts.get(x.arg as usize).map(|o| &**o),
-                        Some(PyObject::None)
-                    ) =>
+                Op::LOAD_CONST | Op::LOAD_COMMON_CONSTANT
+                    if self.loads_none(x.op, x.arg) =>
                 {
                     nones += 1;
                     k += 1;
@@ -47292,7 +47303,16 @@ impl<'a> Ctx<'a> {
             && star_args_none(&args)
             && args.iter().all(|a| matches!(&**a, Expr::Const(o) if matches!(&**o, PyObject::None)))
         {
-            self.with_exits -= 1;
+            // A constant early return has no SWAP-based return tail. Its
+            // copied __aexit__ call must not consume the enclosing with's
+            // bookkeeping needed by later branches and the final exit.
+            let early_exit = self.blocks.iter().any(|block| {
+                block.kind == BlockType::With && block.end > self.cur_offset
+            }) && matches!(self.blocks.last().map(|block| block.kind),
+                          Some(BlockType::If) | Some(BlockType::Else));
+            if !early_exit {
+                self.with_exits -= 1;
+            }
             let next_awaitable = self
                 .idx_of
                 .get(&self.cur_offset)
@@ -47717,7 +47737,13 @@ impl<'a> Ctx<'a> {
             && none_args
             && (func_is_none || func_is_underflow)
         {
-            self.with_exits -= 1;
+            let early_exit = self.blocks.iter().any(|block| {
+                block.kind == BlockType::With && block.end > self.cur_offset
+            }) && matches!(self.blocks.last().map(|block| block.kind),
+                          Some(BlockType::If) | Some(BlockType::Else));
+            if !early_exit {
+                self.with_exits -= 1;
+            }
             // async with (3.11+): the __aexit__ result is awaited right
             // after the swallowed call — the protocol has no awaitable on
             // our modeled stack, so drop it cleanly (no underflow)
