@@ -51711,9 +51711,10 @@ impl<'a> Ctx<'a> {
 
 // =====================  comprehensions  =====================
 
-// The main statement parser already understands PEP 709's nested inline
-// comprehensions. Reuse it for generator elements instead of flattening an
-// inner dict/list/set comprehension into the generator's own clauses.
+// The main statement parser understands nested inline comprehensions,
+// optimized unpack targets, and nested closure calls. Reuse its For/If/Yield
+// tree for eligible 3.12+ generators, retaining the legacy simulator as a
+// fallback when the statement result is incomplete or not a generator tree.
 fn generator_parts_from_body(
     body: &[Stmt], generators: &mut Vec<Comprehension>,
 ) -> Option<ExprRef> {
@@ -52016,13 +52017,32 @@ fn genexpr_ternary_merge(
         let table = table_for(self.version).ok()?;
         let instrs = crate::bytecode::decode_instructions(code, table, self.version);
 
-        if self.version.at_least(3, 12) && matches!(_kind, CompKind::Generator)
-            && instrs.iter().any(|instruction| instruction.op == Op::LOAD_FAST_AND_CLEAR)
-        {
+        if self.version.at_least(3, 12) && matches!(_kind, CompKind::Generator) {
             if let Some(statements) = decompile(code, self.version).ok().filter(|result| result.clean) {
                 let mut generators = Vec::new();
                 if let Some(element) = generator_parts_from_body(&statements.body, &mut generators) {
                     if !generators.is_empty() {
+                        // In 3.12, a filter on a separate source line jumps
+                        // to the shared back edge instead of to the yield.
+                        // Preserve the legacy walker's layout hint when the
+                        // decoded loops map one-to-one to generator clauses.
+                        if !self.version.at_least(3, 13) {
+                            let loops: Vec<_> = instrs.iter()
+                                .filter(|ins| ins.op == Op::FOR_ITER).collect();
+                            if loops.len() == generators.len() {
+                                for (clause, loop_head) in generators.iter_mut().zip(loops.iter()) {
+                                    clause.if_line_break = !clause.ifs.is_empty() && instrs.iter().any(|ins| {
+                                        ins.op == Op::POP_JUMP_IF_FALSE
+                                            && ins.offset > loop_head.offset
+                                            && loop_head.target.map_or(false, |end| ins.offset < end)
+                                            && ins.target.and_then(|target| instrs.iter()
+                                                .find(|tail| tail.offset == target))
+                                                .map_or(false, |tail| tail.op == Op::JUMP_BACKWARD
+                                                    && tail.target == Some(loop_head.offset))
+                                    });
+                                }
+                            }
+                        }
                         generators[0].iter = outer_iter.clone();
                         return Some((element, None, generators));
                     }

@@ -130,6 +130,29 @@ fn chained_comparison_ternaries_keep_collection_values_and_filters_distinct() {
 }
 
 #[test]
+fn generator_statement_route_preserves_repeated_targets_and_closure_calls() {
+    for version in ["3.12", "3.13", "3.14", "3.15"] {
+        let (src, clean) = decompile_fixture(
+            &format!("generator_statement_reconstruction.{version}.pyc"));
+        assert!(clean, "Python {version}: incomplete:\n{src}");
+        assert_contains(&src, &[
+            "value is not None for value, discarded, discarded, discarded in values",
+            "(value, discarded, _) for value, _, discarded, discarded in values",
+            "sum((value for value in row)) / len(row) for row in rows",
+            "sum((factory(deltas) for _ in deltas)) / len(deltas) for _ in range(3)",
+        ], version);
+    }
+}
+
+#[test]
+fn generator_statement_route_keeps_python312_multiline_filter_layout() {
+    let (src, clean) = decompile_fixture("generator_multiline_filter_312.3.12.pyc");
+    assert!(clean, "{src}");
+    assert_contains(&src, &["value for value in values\n         if value not in excluded"],
+                    "3.12 multiline filter");
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");
@@ -321,8 +344,16 @@ fn generator_expanded_calls() {
             &src,
             &[
                 "def positional(rows, factory):\n    return tuple((factory(*row) for row in rows))",
-                "def keywords(rows, factory):\n    return tuple((factory(*(), **{**dict(row)}) for row in rows))",
-                "def both(rows, factory):\n    return tuple((factory(*row[0], **{**row[1]}) for row in rows))",
+                if version == "3.11" {
+                    "def keywords(rows, factory):\n    return tuple((factory(*(), **{**dict(row)}) for row in rows))"
+                } else {
+                    "def keywords(rows, factory):\n    return tuple((factory(**dict(row)) for row in rows))"
+                },
+                if version == "3.11" {
+                    "def both(rows, factory):\n    return tuple((factory(*row[0], **{**row[1]}) for row in rows))"
+                } else {
+                    "def both(rows, factory):\n    return tuple((factory(*row[0], **row[1]) for row in rows))"
+                },
             ],
             &fixture,
         );
