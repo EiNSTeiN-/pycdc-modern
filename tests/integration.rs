@@ -93,6 +93,27 @@ fn padded_return_consumes_the_existing_calculated_value_once() {
 }
 
 #[test]
+fn bounded_try_return_keeps_its_handler_and_following_sibling() {
+    for version in ["3.11", "3.12", "3.13", "3.14", "3.15"] {
+        for padding in [0, 1, 3] {
+            let (src, clean) = decompile_fixture(
+                &format!("bounded_try_returns_{padding}.{version}.pyc"));
+            assert!(clean, "Python {version}, padding {padding}: incomplete:\n{src}");
+            assert_contains(&src, &[
+                "try:\n            return datetime.fromtimestamp(value, timezone.utc)",
+                "except (OverflowError, OSError, ValueError):\n            return\n    if isinstance(value, str):",
+                "try:\n            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))",
+                "parsed.astimezone(timezone.utc)",
+                "def unprotected_return(read):", "def else_return(read):",
+                "read('inside')", "return read('outside')",
+            ], version);
+            assert_eq!(src.matches("datetime.fromtimestamp(value, timezone.utc)").count(), 1,
+                       "{version}: {src}");
+        }
+    }
+}
+
+#[test]
 fn py27_if_elif_else() {
     let (src, clean) = decompile_fixture("if_elif_else.2.7.pyc");
     assert!(clean, "output marked incomplete:\n{src}");

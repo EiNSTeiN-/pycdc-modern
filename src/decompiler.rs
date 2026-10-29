@@ -5095,6 +5095,50 @@ impl<'a> Ctx<'a> {
             }
         }
         let mut body = self.pending_try_body.pop().unwrap_or_default();
+        // A narrowed except-only range can end on padding immediately before
+        // RETURN_VALUE, while its calculated value is still live. Preserve
+        // that exact carried return inside the try without scanning onward
+        // into a following sibling branch or an out-of-line handler.
+        if self.version.at_least(3, 11)
+            && self.code.name != "<module>"
+            && tc.except_handler.is_some()
+            && tc.finally_handler.is_none()
+            && tc.region_end == tc.body_end
+            && body.is_empty()
+            && orelse.is_empty()
+            && self.stack.len() == 1
+            && matches!(self.stack.last(), Some(Sv::E(_)))
+        {
+            let tail = self.instrs.iter()
+                .skip_while(|instruction| instruction.offset < tc.body_end)
+                .find(|instruction| !matches!(instruction.op,
+                    Op::NOP | Op::NOT_TAKEN | Op::CACHE))
+                .copied();
+            if let Some(ret) = tail {
+                let before_handler = tc.except_handler.map_or(false, |handler| ret.offset < handler);
+                let entered_from_outside = self.instrs.iter().any(|instruction| {
+                    (instruction.offset < tc.start || instruction.offset > ret.offset)
+                        && instruction.target.map_or(false, |target| {
+                            target >= tc.body_end && target <= ret.offset
+                        })
+                });
+                let has_context_protocol = self.instrs.iter().any(|instruction| {
+                    instruction.offset >= tc.start && instruction.offset <= tc.body_end
+                        && matches!(instruction.op, Op::BEFORE_WITH | Op::BEFORE_ASYNC_WITH
+                            | Op::WITH_EXCEPT_START | Op::LOAD_SPECIAL)
+                });
+                if ret.op == Op::RETURN_VALUE && before_handler
+                    && !entered_from_outside && !has_context_protocol
+                    && !self.return_offsets.contains(&ret.offset)
+                {
+                    body.push(Stmt::Return(Some(self.pop_expr())));
+                    self.return_offsets.insert(ret.offset);
+                    if self.skip_until.map_or(true, |skip| skip < ret.end()) {
+                        self.skip_until = Some(ret.end());
+                    }
+                }
+            }
+        }
         // 3.12+ with-wrapped try: the body's tail `return None` sits in
         // the gap between body_end and the chain head, AFTER the inline
         // with success-exit sequence (POP_EXCEPT; LOAD None ×3; CALL;
